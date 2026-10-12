@@ -59,21 +59,18 @@ jobs:
         run: |
           python -m pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Download and validate medium model for packaged test
-        run: |
-          python scripts/download_model.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build single executable
         shell: pwsh
         run: |
           $ffmpeg = (Get-Content desktop/vendor/location.txt -Raw).Trim()
           python -m PyInstaller --noconfirm --clean --onefile --console --name IyoringCutStudio --paths . --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime --collect-all tokenizers --collect-all av --collect-all huggingface_hub --collect-submodules uvicorn --add-data 'web;web' --add-data "$ffmpeg;ffmpeg" desktop/launcher.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify the packaged executable
+      - name: Verify first launch of the packaged executable
         shell: pwsh
         run: |
           # Prove FFmpeg comes from the executable, not the runner's build directory.
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          if (Test-Path (Join-Path $env:STUDIO_DATA_DIR 'models/whisper-medium')) { throw 'First launch test requires an empty model directory' }
           $process = Start-Process -FilePath (Resolve-Path 'dist/IyoringCutStudio.exe') -ArgumentList '--smoke-test' -Wait -PassThru -NoNewWindow
           if ($process.ExitCode -ne 0) { throw "Packaged executable test failed: $($process.ExitCode)" }
       - name: Publish verified free download
