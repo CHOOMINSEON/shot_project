@@ -94,7 +94,8 @@ def test_ten_gb_sparse_offsets_are_not_a_dense_load_test(owner, monkeypatch):
     with path.open('rb') as file:
         file.seek(limit - 1)
         assert file.read(1) == b'z'
-    assert path.stat().st_blocks * 512 < 2 * CHUNK_BYTES
+    from studio.storage import allocated_bytes
+    assert allocated_bytes(path) < 2 * CHUNK_BYTES
     assert owner.post(endpoint + '/complete').status_code == 409
     assert owner.delete(endpoint).status_code == 200
 

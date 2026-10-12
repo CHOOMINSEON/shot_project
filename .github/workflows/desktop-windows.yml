@@ -46,7 +46,15 @@ jobs:
           $bin = Get-ChildItem desktop/vendor -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $bin) { throw 'FFmpeg binary missing' }
           $bin.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $bin.Directory.Parent.FullName | Out-File -FilePath 'desktop/vendor/location.txt' -Encoding utf8
+          # Keep FFmpeg/ffprobe and licensing; avoid shipping the unused ffplay player.
+          $bundle = New-Item -ItemType Directory -Force desktop/bundled_ffmpeg
+          $bundleBin = New-Item -ItemType Directory -Force desktop/bundled_ffmpeg/bin
+          Copy-Item $bin.FullName $bundleBin.FullName
+          Copy-Item (Join-Path $bin.DirectoryName 'ffprobe.exe') $bundleBin.FullName
+          Get-ChildItem $bin.DirectoryName -Filter '*.dll' | Copy-Item -Destination $bundleBin.FullName
+          Get-ChildItem $bin.Directory.Parent.FullName -File | Copy-Item -Destination $bundle.FullName
+          if (-not (Get-ChildItem $bundle.FullName -Filter 'LICENSE*')) { throw 'FFmpeg license missing' }
+          $bundle.FullName | Out-File -FilePath 'desktop/vendor/location.txt' -Encoding utf8
       - name: Test Windows processing and authentication
         run: |
           python -m pytest -q

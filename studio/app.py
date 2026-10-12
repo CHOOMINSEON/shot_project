@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock
 from pydantic import BaseModel, Field, StrictInt
 
-from . import db, timeline, worker, planning, proofreading
+from . import db, timeline, worker, planning, proofreading, storage
 from .settings import CHUNK_BYTES, DATA, MAX_FILE_BYTES, MAX_INPUT_SECONDS, MAX_OUTPUT_SECONDS, MODEL_DIR, MODEL_NAME, ROOT
 
 LOCKS = {}
@@ -277,6 +277,7 @@ async def upload_chunk(ident: str, index: int, request: Request):
             # A sparse staging file accepts out-of-order chunks without holding the source in RAM.
             staging = parent / 'upload.part'
             with staging.open('r+b' if staging.exists() else 'w+b') as output, temporary.open('rb') as source:
+                storage.mark_sparse(output)
                 output.seek(index * CHUNK_BYTES)
                 shutil.copyfileobj(source, output, 1024 * 1024)
                 output.flush()
