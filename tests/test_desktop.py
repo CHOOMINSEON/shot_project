@@ -1,7 +1,84 @@
 from fastapi.testclient import TestClient
+import threading
+import pytest
 
 from desktop.session import install_desktop_entry
 from studio.app import app
+from desktop.preparation import ModelPreparation, install_preparation
+
+
+@pytest.fixture
+def setup_controller(client):
+    release = threading.Event()
+    controller = ModelPreparation(prepare=lambda: release.wait(10), load=lambda: None)
+    routes = list(app.router.routes)
+    install_preparation(app, controller)
+    try:
+        yield controller, release
+    finally:
+        release.set()
+        if controller.thread:
+            controller.thread.join(5)
+        app.router.routes[:] = routes
+        del app.state.desktop_setup
+
+
+def test_desktop_preparation_does_not_block_work_and_requires_owner(owner, setup_controller):
+    controller, release = setup_controller
+    assert owner.get('/api/desktop/status').json()['status'] == 'waiting'
+    assert not owner.get('/api/config').json()['model_ready']
+    assert owner.post('/api/projects', json={'name': '설치 중에도 사용할 작업실'}).status_code == 200
+    assert controller.start()
+    assert not controller.start()
+    assert owner.get('/api/desktop/status').json()['status'] == 'preparing'
+    assert owner.post('/api/desktop/retry').status_code == 409
+    assert owner.post('/api/desktop/retry', headers={'Origin': 'https://other.example'}).status_code == 403
+    owner.cookies.clear()
+    assert owner.get('/api/desktop/status').status_code == 401
+    release.set()
+    controller.thread.join(5)
+    assert controller.snapshot()['status'] == 'ready'
+
+
+def test_desktop_model_failure_can_retry(owner, setup_controller):
+    controller, _ = setup_controller
+    attempts = []
+
+    def prepare():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError('fixture download failed')
+
+    controller.prepare = prepare
+    controller.start()
+    controller.thread.join(5)
+    result = owner.get('/api/desktop/status').json()
+    assert result['status'] == 'error' and result['can_retry']
+    assert 'fixture download failed' not in result['message']
+    assert owner.post('/api/desktop/retry').status_code == 202
+    controller.thread.join(5)
+    assert owner.get('/api/desktop/status').json()['status'] == 'ready'
+    assert owner.get('/api/config').json()['model_ready']
+
+
+def test_desktop_preparation_reports_partial_download(owner, setup_controller):
+    from studio.settings import DATA, MODEL_NAME
+    controller, _ = setup_controller
+    partial = DATA / 'models' / f'.{MODEL_NAME}.download' / 'weights.incomplete'
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b'partial model bytes')
+    try:
+        controller.start()
+        assert owner.get('/api/desktop/status').json()['downloaded_bytes'] >= partial.stat().st_size
+    finally:
+        partial.unlink()
+
+
+def test_desktop_preparing_blocks_transcription_not_upload(owner, setup_controller, sample):
+    from test_app import upload_video
+    project, ident = upload_video(owner, sample)
+    assert owner.post('/api/projects/' + project['id'] + '/analyze',
+                      json={'asset_id': ident, 'transcribe': True}).status_code == 503
 
 
 def test_desktop_ticket_is_local_single_use_and_preserves_auth(client):

@@ -8,6 +8,7 @@ on:
       - '.github/workflows/desktop-windows.yml'
       - 'desktop/**'
       - 'studio/**'
+      - 'web/**'
       - 'scripts/download_model.py'
       - 'requirements*'
       - 'tests/**'

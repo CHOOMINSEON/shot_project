@@ -9,6 +9,7 @@ const bytes = n => n >= 1e9 ? `${(n/1e9).toFixed(2)} GB` : `${(n/1e6).toFixed(1)
 let project=null, config=null, selected=0, activeAsset=null, history=[], future=[], saveQueue=Promise.resolve(), saving=0;
 let mode='edited', rendered=null, currentJobIds=new Map(), pollTimer=null, uploadAbort=null, uploadPaused=false;
 let contextEnd=null, currentSource=null, pendingSeek=null;
+let desktopTimer=null;
 const captionFindings=new Map();
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').style.display='none',6000);}
 async function api(path, options={}){
@@ -163,5 +164,20 @@ async function uploadFiles(files){
 }
 bind('upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});for(const event of ['dragenter','dragover'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.add('drag');});for(const event of ['dragleave','drop'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.remove('drag');if(event==='drop')uploadFiles([...e.dataTransfer.files]).catch(error=>toast(error.message));});
 bind('login-form','submit',async e=>{e.preventDefault();try{await api('/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('login-dialog').close();await init();}catch(error){$('login-error').textContent=error.message;}});$('login-dialog').addEventListener('cancel',e=>e.preventDefault());action('logout',async()=>{await api('/logout',{method:'POST'});$('player').pause();location.reload();});
-async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);$('model-status').textContent=config.model_ready?`한국어 Whisper ${config.model_name} 준비됨 · 제품명은 등록하고 원음을 검수해 주세요.`:'음성 인식 모델 설치 전이에요. 공백만 분석과 수동 편집은 사용할 수 있어요.';$('analyze').disabled=!config.model_ready;await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
+function modelInfo(){
+  $('model-status').textContent=config.model_ready?`한국어 Whisper ${config.model_name} 준비됨 · 제품명은 등록하고 원음을 검수해 주세요.`:(config.desktop?'자막 모델을 준비하고 있어요. 상단에서 진행 상황을 확인해 주세요.':'음성 인식 모델 설치 전이에요. 공백만 분석과 수동 편집은 사용할 수 있어요.');
+  $('analyze').disabled=!config.model_ready;
+}
+async function refreshDesktop(){
+  if(!config?.desktop || $('login-dialog').open)return;
+  const status=await api('/desktop/status');
+  $('desktop-setup').classList.remove('hidden');
+  $('desktop-setup').dataset.status=status.status;
+  $('desktop-setup-message').textContent=status.message;
+  $('desktop-setup-detail').textContent=status.status==='preparing'&&status.downloaded_bytes?`받은 파일 ${bytes(status.downloaded_bytes)} · 처음 한 번 준비하면 다음부터 재사용해요.`:'';
+  $('desktop-setup-retry').classList.toggle('hidden',!status.can_retry);
+  config.model_ready=status.status==='ready';modelInfo();
+}
+action('desktop-setup-retry',async()=>{await api('/desktop/retry',{method:'POST'});await refreshDesktop();});
+async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
 window.addEventListener('resize',waveform);window.addEventListener('DOMContentLoaded',init);

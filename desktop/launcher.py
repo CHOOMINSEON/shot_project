@@ -79,12 +79,11 @@ def run(smoke_test=False):
             print('첫 실행입니다. 한국어 자막 인식 모델(약 1.5GB)을 자동으로 준비합니다. 잠시 기다려 주세요.', flush=True)
         else:
             print('이요링 컷 스튜디오를 시작합니다.', flush=True)
-        from scripts.download_model import ensure_model
-        ensure_model()
-        from studio.worker import load_model
-        load_model()
         from studio.app import app
         from desktop.session import install_desktop_entry
+        from desktop.preparation import ModelPreparation, install_preparation
+        preparation = ModelPreparation()
+        install_preparation(app, preparation)
         import uvicorn
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(('127.0.0.1', 0))
@@ -102,10 +101,33 @@ def run(smoke_test=False):
                     raise RuntimeError('앱 시작에 실패했습니다. 이미 실행 중인지 확인해 주세요.')
                 time.sleep(.1)
             if smoke_test:
+                # The app must be usable BEFORE the model download is started.
+                import httpx
+                with httpx.Client(base_url=base, trust_env=False) as client:
+                    assert client.get(entry).status_code == 303
+                    assert client.get('/').status_code == 200
+                    assert not client.get('/api/config').json()['model_ready']
+                    assert client.get('/api/desktop/status').json()['status'] == 'waiting'
+                    project = client.post('/api/projects', json={'name': '모델 준비 전 작업실'}).json()
+                    assert project['id']
+                print('Immediate startup passed: web UI and projects available before downloading the model.', flush=True)
+                preparation.start()
+                deadline = time.monotonic() + 900
+                while preparation.snapshot()['status'] != 'ready':
+                    if preparation.snapshot()['status'] == 'error' or time.monotonic() >= deadline:
+                        raise RuntimeError('자막 모델 준비 검증에 실패했습니다.')
+                    time.sleep(.2)
+                entry = install_desktop_entry(app)
                 smoke(base, entry)
             else:
-                if not webbrowser.open(base + entry):
-                    raise RuntimeError('기본 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인해 주세요.')
+                try:
+                    opened = webbrowser.open(base + entry)
+                except OSError:
+                    opened = False
+                if not opened:
+                    print('브라우저를 자동으로 열지 못했습니다. 브라우저 주소창에 다음 주소를 붙여 넣어 주세요:', flush=True)
+                    print(base + entry, flush=True)
+                preparation.start()
                 print('브라우저에서 작업하세요. 이 창을 닫거나 Ctrl+C를 누르면 앱이 종료됩니다.', flush=True)
                 print('다시 실행하면 프로젝트와 원본을 이어서 사용할 수 있습니다.', flush=True)
                 while thread.is_alive():

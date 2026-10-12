@@ -133,11 +133,13 @@ def logout(request: Request):
 
 
 @app.get('/api/config')
-def config():
+def config(request: Request):
     usage = shutil.disk_usage(DATA)
+    setup = getattr(request.app.state, 'desktop_setup', None)
+    ready = setup.snapshot()['status'] == 'ready' if setup else (MODEL_DIR / 'model.bin').exists()
     return {'max_file_bytes': MAX_FILE_BYTES, 'max_input_seconds': MAX_INPUT_SECONDS,
             'max_output_seconds': MAX_OUTPUT_SECONDS, 'chunk_bytes': CHUNK_BYTES,
-            'model_ready': (MODEL_DIR / 'model.bin').exists(), 'model_name': MODEL_NAME, 'free_bytes': usage.free,
+            'model_ready': ready, 'model_name': MODEL_NAME, 'free_bytes': usage.free, 'desktop': setup is not None,
             'privacy': '영상과 오디오는 이 앱의 서버에서 처리합니다. 외부 음성 인식 API에 전송하지 않습니다.'}
 
 
@@ -358,10 +360,13 @@ class Analysis(BaseModel):
 
 
 @app.post('/api/projects/{ident}/analyze')
-def analyze(ident: str, body: Analysis):
+def analyze(ident: str, body: Analysis, request: Request):
     current = project(ident)
     if not any(a['id'] == body.asset_id and a['status'] == 'ready' for a in current['assets']):
         raise HTTPException(422, '이 프로젝트의 검사 완료 원본을 선택해 주세요.')
+    setup = getattr(request.app.state, 'desktop_setup', None)
+    if body.transcribe and setup and setup.snapshot()['status'] != 'ready':
+        raise HTTPException(503, '자막 모델을 준비하고 있습니다. 상단의 준비 상태를 확인해 주세요.')
     if body.transcribe and not (MODEL_DIR / 'model.bin').exists():
         raise HTTPException(503, '음성 인식 모델이 준비되지 않았습니다. 공백만 분석하거나 서버에서 모델을 설치해 주세요.')
     return {'job_id': db.job(ident, 'analyze', {**body.model_dump(), 'model': MODEL_NAME})}

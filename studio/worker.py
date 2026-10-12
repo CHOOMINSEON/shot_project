@@ -18,6 +18,7 @@ from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS
 STOP = threading.Event()
 MODEL = None
 MODEL_ID = None
+MODEL_LOCK = threading.Lock()
 
 
 def asset_path(ident):
@@ -53,14 +54,15 @@ def load_model(name=None):
     directory = DATA / 'models' / f'whisper-{name}'
     if name == 'base' and not (directory / 'model.bin').exists():
         directory = DATA / 'models' / 'whisper'
-    if MODEL is None or MODEL_ID != name:
-        if not (directory / 'model.bin').exists():
-            raise ValueError('음성 인식 모델이 준비되지 않았습니다. 서버에서 scripts/download_model.py를 실행해 주세요. 공백 분석과 수동 편집은 모델 없이 사용할 수 있습니다.')
-        from faster_whisper import WhisperModel
-        MODEL = None
-        MODEL = WhisperModel(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
-        MODEL_ID = name
-    return MODEL
+    with MODEL_LOCK:
+        if MODEL is None or MODEL_ID != name:
+            if not (directory / 'model.bin').exists():
+                raise ValueError('음성 인식 모델이 준비되지 않았습니다. 서버에서 scripts/download_model.py를 실행해 주세요. 공백 분석과 수동 편집은 모델 없이 사용할 수 있습니다.')
+            from faster_whisper import WhisperModel
+            MODEL = None
+            MODEL = WhisperModel(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
+            MODEL_ID = name
+        return MODEL
 
 
 def ingest(ident, payload):
