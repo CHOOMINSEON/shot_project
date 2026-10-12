@@ -10,3 +10,4 @@ desktop/vendor/
 build/
 dist/
 *.spec
+.desktop-data*/

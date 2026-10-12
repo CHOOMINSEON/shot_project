@@ -22,7 +22,7 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
-      STUDIO_DATA_DIR: "${{ runner.temp }}/iyoring-한국어-o'neil"
+      STUDIO_DATA_DIR: ".desktop-data-한국어-o'neil"
       HF_HUB_DISABLE_XET: '1'
     steps:
       - uses: actions/checkout@v4
