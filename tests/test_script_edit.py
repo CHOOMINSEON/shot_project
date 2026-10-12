@@ -174,3 +174,14 @@ def test_switching_to_dubbing_does_not_attach_another_sources_caption_edit():
     dubbed=script_edit.assemble(brief,original,assets,voice_mode='dubbing')
     assert dubbed['captions']['items'][0]['text']!='이전 원음에서만 검수한 문구'
     assert dubbed['captions']['archived_edits'][0]['text']=='이전 원음에서만 검수한 문구'
+
+
+def test_korean_store_and_counts_match_across_separate_asr_words_without_truncation():
+    source=transcript()
+    texts=['씨','유','다섯','곳이나','돌아서','겨우','세','개를','구했거든요?']
+    source['analysis']['words']=[{'id':str(i),'text':' '+text,'start':i*.6,'end':(i+1)*.6,'confidence':.99} for i,text in enumerate(texts)]
+    value=script_edit.assemble(script_edit.Brief(script='CU 5곳이나 돌아서 겨우 3개를 구했거든요?'),state(),{'v':source})
+    assert value['script_edit']['complete'] and value['script_edit']['lines'][0]['start']==0
+    assert value['script_edit']['lines'][0]['end']==pytest.approx(5.4)
+    value=script_edit.assemble(script_edit.Brief(script='CU'),state(),{'v':source})
+    assert value['script_edit']['lines'][0]['end']==1.2

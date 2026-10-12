@@ -38,7 +38,7 @@ def normalized(value):
     value = unicodedata.normalize('NFKC', value).lower()
     value = re.sub(r'씨\s*유', 'cu', value)
     for source, target in [('첫', '1'), ('두', '2'), ('세', '3'), ('네', '4'), ('다섯', '5'), ('여섯', '6')]:
-        value = re.sub(source + r'\s*(?=번째|곳|개\b)', target, value)
+        value = re.sub(source + r'\s*(?=번째|곳|개)', target, value)
     return ''.join(c for c in value if c.isalnum())
 
 
@@ -55,7 +55,22 @@ class Transcript:
         self.words = [w for w in asset['analysis'].get('words', []) if normalized(w.get('text', ''))
                       and timeline.finite(w.get('start')) and timeline.finite(w.get('end'))
                       and 0 <= w['start'] < w['end'] <= asset['metadata']['duration'] + .001]
-        self.parts = [normalized(w['text']) for w in self.words]
+        # Normalize across ASR word boundaries (e.g. '다섯' + '곳', '씨' + '유'),
+        # retaining ownership so the selected source timing includes every syllable.
+        raw_parts = [''.join(c for c in unicodedata.normalize('NFKC',w['text']).lower() if c.isalnum()) for w in self.words]
+        text = ''.join(raw_parts)
+        owners = [index for index,part in enumerate(raw_parts) for _ in part]
+        rules = [('씨유','cu')] + [(source+r'(?=번째|곳|개)',target) for source,target in
+                                [('첫','1'),('두','2'),('세','3'),('네','4'),('다섯','5'),('여섯','6')]]
+        for pattern,replacement in rules:
+            for match in reversed(list(re.finditer(pattern,text))):
+                a,b=match.span()
+                text=text[:a]+replacement+text[b:]
+                owners[a:b]=[owners[a]]*len(replacement)
+        parts=[[] for _ in self.words]
+        for char,owner in zip(text,owners):
+            parts[owner].append(char)
+        self.parts = [''.join(part) for part in parts]
         self.offsets = [0]
         for part in self.parts:
             self.offsets.append(self.offsets[-1] + len(part))
@@ -86,6 +101,8 @@ class Transcript:
             a = self.words[start]['start']
             for end in range(start + 1, min(len(self.words), start + 100) + 1):
                 b = self.words[end-1]['end']
+                if end < len(self.words) and not self.parts[end]:
+                    continue
                 if b-a > 60 or (end > start+1 and self.words[end-1]['start']-self.words[end-2]['end'] > 2):
                     break
                 text = self.text[self.offsets[start]:self.offsets[end]]
