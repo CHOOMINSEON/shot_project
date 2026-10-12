@@ -1,9 +1,10 @@
 import json
 import math
 import os
-import selectors
+import queue
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -57,40 +58,63 @@ def run_ffmpeg(args, work, cancelled=lambda: False, progress=lambda _: None, exp
                '-progress', 'pipe:1', '-nostats'] + [str(a) for a in args]
     start = time.monotonic()
     with log.open('wb') as errors:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        pending = b''
+        # Windows cannot select anonymous subprocess pipes. A bounded reader queue
+        # also keeps cancellation and timeouts responsive on all supported systems.
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors,
+                                   start_new_session=os.name != 'nt',
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
+        lines = queue.Queue(maxsize=128)
+        stopped = threading.Event()
+
+        def read_progress():
+            for line in iter(process.stdout.readline, b''):
+                while not stopped.is_set():
+                    try:
+                        lines.put(line, timeout=.3)
+                        break
+                    except queue.Full:
+                        continue
+                if stopped.is_set():
+                    break
+
+        reader = threading.Thread(target=read_progress, daemon=True, name='ffmpeg-progress')
+        reader.start()
         try:
             while process.poll() is None:
                 if cancelled():
                     raise Cancelled('작업을 취소했습니다.')
                 if time.monotonic() - start > JOB_TIMEOUT:
                     raise ValueError('작업 실행 제한 시간을 넘었습니다. 더 작은 구간으로 나누거나 서버 작업 제한을 조정해 주세요.')
-                for key, _ in selector.select(.3):
-                    data = os.read(key.fd, 8192)
-                    pending += data
-                    while b'\n' in pending:
-                        line, pending = pending.split(b'\n', 1)
-                        if line.startswith(b'out_time_us=') and expected_seconds:
-                            try:
-                                progress(min(.999, int(line.split(b'=')[1]) / 1e6 / expected_seconds))
-                            except ValueError:
-                                pass
+                try:
+                    line = lines.get(timeout=.3)
+                except queue.Empty:
+                    continue
+                if line.startswith(b'out_time_us=') and expected_seconds:
+                    try:
+                        progress(min(.999, int(line.split(b'=')[1]) / 1e6 / expected_seconds))
+                    except ValueError:
+                        pass
             if process.returncode:
                 with log.open('rb') as file:
                     file.seek(max(0, log.stat().st_size - 4000))
                     tail = file.read(4000).decode('utf-8', errors='replace')
                 raise ValueError('FFmpeg 처리 실패: ' + tail[-2000:])
         finally:
-            selector.close()
+            stopped.set()
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+                if os.name == 'nt':
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    if os.name == 'nt':
+                        process.kill()
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+            reader.join(timeout=5)
             process.stdout.close()
     progress(1)
 

@@ -97,7 +97,7 @@ def analyze(ident, payload):
     work.mkdir(exist_ok=True)
     checkpoint = work / 'analysis.json'
     length = asset['metadata']['duration']
-    data = json.loads(checkpoint.read_text()) if checkpoint.exists() else {'speech': [], 'words': [], 'peaks': [], 'next': 0}
+    data = json.loads(checkpoint.read_text(encoding='utf-8')) if checkpoint.exists() else {'speech': [], 'words': [], 'peaks': [], 'next': 0}
     # Freeze model identity across resumed windows, including checkpoints from the original base version.
     model_name = data.get('model') or ('base' if data['next'] and data['words'] else payload.get('model', MODEL_NAME))
     model = (load_model() if model_name == MODEL_NAME else load_model(model_name)) if payload.get('transcribe') else None
@@ -199,7 +199,8 @@ def render(ident, payload):
         prefix = base if len(groups) == 1 else f'{gi:03}_{base}'
         output = target / f'{prefix}.mp4'
         concat = work / 'concat.txt'
-        concat.write_text(''.join(f"file '{p.as_posix()}'\n" for p in pieces))
+        paths = [p.as_posix().replace("'", "'\\''") for p in pieces]
+        concat.write_text(''.join("file '" + path + "'\n" for path in paths), encoding='utf-8')
         run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '0', '-i', concat,
                     '-c', 'copy', '-movflags', '+faststart', output], work, lambda: is_cancelled(ident))
         rendered_info = probe(output)

@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from filelock import FileLock
 from pydantic import BaseModel, Field, StrictInt
 
 from . import db, timeline, worker, planning, proofreading
@@ -42,10 +43,8 @@ def owner_password():
 
 @asynccontextmanager
 async def lifespan(app):
-    import fcntl
     # Reject duplicate workers instead of resetting another process's live jobs.
-    with (DATA / 'worker.lock').open('a') as worker_lock:
-        fcntl.flock(worker_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with FileLock(DATA / 'worker.lock', timeout=0):
         db.init()
         owner_password()
         for temporary in (DATA / 'assets').glob('*/chunk-*.tmp'):

@@ -4,6 +4,8 @@
 
 ## 실행
 
+Windows용 바로 실행 프로그램은 [desktop/README.md](desktop/README.md)에 안내합니다. GitHub Actions가 실제 Windows 테스트와 실행 파일 자체의 검증을 통과한 경우에만 Release에 `IyoringCutStudio.exe`를 게시합니다. Docker·Python·FFmpeg 별도 설치 없이 해당 PC에서 작업하며, 공개 웹사이트 배포와는 다릅니다.
+
 결제 없이 사용자 PC에서 실행하고 임시 공개 주소를 만드는 패키지는 [deploy/free-local/README.md](deploy/free-local/README.md)를 참고하세요. 공개 접속은 PC·Docker·인터넷과 터널 연결이 유지되는 동안 가능합니다. 현재 클라우드 환경에서는 공개 터널 연결이 실패했고 공개 배포는 완료하지 못했습니다.
 
 Python 3.12, FFmpeg/ffprobe, libx264/AAC/zscale 필터가 필요합니다.

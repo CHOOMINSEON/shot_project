@@ -2,7 +2,6 @@
 import argparse
 import os
 import sys
-import fcntl
 import shutil
 from pathlib import Path
 
@@ -12,21 +11,30 @@ from studio.settings import DATA, MODEL_NAME
 os.environ.setdefault('HF_HOME', str(DATA / 'huggingface'))
 
 from faster_whisper.utils import download_model
+from filelock import FileLock
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--model', default=MODEL_NAME, choices=['tiny', 'base', 'small', 'medium'])
-args = parser.parse_args()
-target = DATA / 'models' / f'whisper-{args.model}'
-with (DATA / 'models' / f'.{args.model}.lock').open('w') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    if not all((target / name).is_file() and (target / name).stat().st_size for name in ['model.bin', 'config.json', 'tokenizer.json']):
-        staging = DATA / 'models' / f'.{args.model}.download'
-        download_model(args.model, output_dir=str(staging))
-        # A partially downloaded directory is never used by the application.
-        from faster_whisper import WhisperModel
-        model = WhisperModel(str(staging), device='cpu', compute_type='int8', cpu_threads=2)
-        del model
-        if target.exists():
-            shutil.rmtree(target)
-        staging.rename(target)
-print(f'Local Whisper {args.model} model ready. Select with STUDIO_WHISPER_MODEL; restart to change models.')
+
+def ensure_model(name=MODEL_NAME):
+    if name not in ['tiny', 'base', 'small', 'medium']:
+        raise ValueError('지원하지 않는 인식 모델입니다.')
+    target = DATA / 'models' / f'whisper-{name}'
+    with FileLock(DATA / 'models' / f'.{name}.lock'):
+        if not all((target / file).is_file() and (target / file).stat().st_size for file in ['model.bin', 'config.json', 'tokenizer.json']):
+            staging = DATA / 'models' / f'.{name}.download'
+            download_model(name, output_dir=str(staging))
+            # A partially downloaded directory is never used by the application.
+            from faster_whisper import WhisperModel
+            model = WhisperModel(str(staging), device='cpu', compute_type='int8', cpu_threads=2)
+            del model
+            if target.exists():
+                shutil.rmtree(target)
+            staging.rename(target)
+    return target
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', default=MODEL_NAME, choices=['tiny', 'base', 'small', 'medium'])
+    args = parser.parse_args()
+    ensure_model(args.model)
+    print(f'Local Whisper {args.model} model ready. Select with STUDIO_WHISPER_MODEL; restart to change models.')

@@ -6,3 +6,7 @@ __pycache__/
 .env
 .env.*
 deploy/free-local/public-url.txt
+desktop/vendor/
+build/
+dist/
+*.spec

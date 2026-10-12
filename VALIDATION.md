@@ -95,6 +95,15 @@ Hugging Face Docker Space용 패키지와 UID 1000 시작 구성을 준비하고
 
 ## 결제 없는 PC 실행 패키지
 
+### Windows 실행 파일 준비
+
+`desktop/launcher.py`에 medium 모델 자동 준비·사용자별 데이터 경로·로컬 PC 바인딩·브라우저 자동 열기·일회용 자동 로그인 기능을 추가했습니다. `desktop/session.py`의 진입 경로는 서버 배포에서 등록하지 않습니다. 로컬 IP·호스트명·유효시간·한 번 사용 조건을 검사하며 로그인 쿠키는 HttpOnly를 유지합니다. 공개 저장소용 표준 Windows GitHub Actions에서 네이티브 테스트·실행 파일 검증이 통과한 뒤에만 Release를 게시하도록 구성했습니다.
+
+- Linux Python 테스트 **43개 통과**: 기존 기능과 새 자동 로그인/재사용 거부/만료/원격 거부/FFmpeg 취소·타임아웃 시 프로세스 종료를 검증했습니다.
+- Linux에서 독립 데이터 경로로 실제 시작 프로그램의 검증 모드를 실행하여 medium/VAD·10GB/2시간 설정·자동 로그인·청크 업로드·실제 MP4 출력/다운로드를 확인했습니다. 기존 공개 Korean medium 가중치를 연결했으며 소유자 비밀번호를 출력하지 않았습니다.
+- Python 3.12 Windows x64용 고정 의존성의 바이너리 다운로드가 성공했습니다. FFmpeg 9.0.2 full Windows 공식 빌드의 SHA-256을 확인하고 빌드 과정에 고정했습니다.
+- 실제 Windows 실행·단일 실행 파일 빌드·해당 EXE의 전체 검증·Release 게시 결과는 GitHub Actions 완료 후 별도로 기록합니다. 위 Linux 검증과 구분합니다.
+
 `deploy/free-local`에 Docker Compose와 Windows/Mac/Linux 시작·종료 파일을 추가했습니다. medium 모델·10GB 업로드·2시간 입력·단일 워커·24시간 FFmpeg 작업 제한을 유지하며, 모델이 없으면 설치 후 서버를 시작합니다. Cloudflare 공식 `2026.10.0` 이미지의 amd64/arm64 매니페스트를 확인했습니다. 시작 파일은 임시 주소의 실제 HTTPS 앱 상태 응답을 확인한 후에만 주소를 저장합니다. 볼륨을 지우지 않는 종료 구성이며 비밀번호는 로그에 출력하지 않습니다.
 
 - Bash 구문과 Compose 설정 검증 통과. Windows PowerShell 5.1의 한국어 소스 해석을 위해 UTF-8 BOM을 포함했습니다.
