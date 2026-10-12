@@ -104,6 +104,12 @@ Hugging Face Docker Space용 패키지와 UID 1000 시작 구성을 준비하고
 - Python 3.12 Windows x64용 고정 의존성의 바이너리 다운로드가 성공했습니다. FFmpeg 9.0.2 full Windows 공식 빌드의 SHA-256을 확인하고 빌드 과정에 고정했습니다.
 - 실제 Windows 실행·단일 실행 파일 빌드·해당 EXE의 전체 검증·Release 게시 결과는 GitHub Actions 완료 후 별도로 기록합니다. 위 Linux 검증과 구분합니다.
 
+**2026-10-12 Windows 완료 결과:** [GitHub Actions 실행 38228318998](https://github.com/CHOOMINSEON/shot_project/actions/runs/38228318998)이 성공했습니다. Windows Python 검증 43개가 27.67초에 통과했습니다. NTFS 희소 파일 활성화와 Windows 실제 할당 크기 측정으로 10GB 주소의 마지막 청크를 저장하고 재개/완료 게이트를 확인했으며, 실제 고밀도 10GB 업로드 부하와 구분합니다.
+
+단일 EXE는 기존 Python/FFmpeg 경로를 제외하고 모델이 없는 데이터 폴더에서 실행했습니다. 패키지 안의 FFmpeg/ffprobe 사용, frozen Python에서 medium 최초 자동 다운로드·실제 모델/VAD 로딩, 한 번 사용하는 자동 로그인·재사용 거부, 10GB/2시간 설정, 실제 합성 영상 업로드·MP4 렌더/HTTP 다운로드가 통과했습니다. 별도로 Linux의 실제 Chromium에서도 시작 주소 → 로그인 화면 없이 UI 진입·crypto API·재사용 거부·JavaScript 오류 0개를 확인했습니다.
+
+[Windows Release](https://github.com/CHOOMINSEON/shot_project/releases/tag/desktop-windows-f3a96d73)에 실행 파일과 SHA-256을 게시했습니다. 공개 다운로드의 HTTP 206와 Windows `MZ` 헤더를 확인했고, GitHub 자산 digest와 다운로드한 `SHA256SUMS.txt`가 일치했습니다. EXE는 281,272,742바이트이며 SHA-256은 `ebe1b2dc4d2e99738f3104048ccb6f135d54379eff2ebac605ca199136ec0b04`입니다. 검증 기반은 표준 Windows GitHub 러너이며 사용자 PC·실제 2시간 촬영 원본의 전체 부하와는 구분합니다. 인터넷 공개 사이트는 배포하지 않았습니다.
+
 `deploy/free-local`에 Docker Compose와 Windows/Mac/Linux 시작·종료 파일을 추가했습니다. medium 모델·10GB 업로드·2시간 입력·단일 워커·24시간 FFmpeg 작업 제한을 유지하며, 모델이 없으면 설치 후 서버를 시작합니다. Cloudflare 공식 `2026.10.0` 이미지의 amd64/arm64 매니페스트를 확인했습니다. 시작 파일은 임시 주소의 실제 HTTPS 앱 상태 응답을 확인한 후에만 주소를 저장합니다. 볼륨을 지우지 않는 종료 구성이며 비밀번호는 로그에 출력하지 않습니다.
 
 - Bash 구문과 Compose 설정 검증 통과. Windows PowerShell 5.1의 한국어 소스 해석을 위해 UTF-8 BOM을 포함했습니다.

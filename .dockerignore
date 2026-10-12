@@ -6,3 +6,9 @@ __pycache__
 .env
 .env.*
 deploy/free-local/public-url.txt
+desktop/vendor
+desktop/bundled_ffmpeg
+.desktop-data*
+build
+dist
+*.spec
