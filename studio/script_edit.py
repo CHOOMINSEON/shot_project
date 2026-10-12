@@ -79,7 +79,7 @@ class Transcript:
         for i in range(len(self.text) - 2):
             self.grams[self.text[i:i+3]].append(i)
 
-    def find(self, query, used):
+    def find(self, query, used, check=lambda: None):
         if not query or not self.words:
             return None
         votes = Counter()
@@ -98,6 +98,7 @@ class Transcript:
                         votes[candidate] += 1
         best = None
         for start, _ in votes.most_common(80):
+            check()
             a = self.words[start]['start']
             for end in range(start + 1, min(len(self.words), start + 100) + 1):
                 b = self.words[end-1]['end']
@@ -145,7 +146,7 @@ def directing(text):
             'all_close': all_close, 'supported': supported, 'unapplied': unsupported}
 
 
-def assemble(brief, state, assets, voice_mode='auto'):
+def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
     videos = [a for a in assets.values() if a['status']=='ready' and a['metadata'].get('has_video', True)]
     dubbing = [a for a in assets.values() if a['status']=='ready' and not a['metadata'].get('has_video', True)]
     selected = dubbing if voice_mode=='dubbing' else videos if voice_mode=='original' else dubbing+videos
@@ -153,12 +154,13 @@ def assemble(brief, state, assets, voice_mode='auto'):
     used, report, clips = defaultdict(list), [], []
     direction = directing(brief.directions)
     for i, line in enumerate(s for s in brief.script.splitlines() if s.strip()):
+        check()
         item = {'line': i+1, 'script': line, 'status': 'missing', 'reason': '실제 대사에서 충분히 일치하는 구간을 찾지 못했어요.'}
         if re.search(r'\[[^\]]+\]', line):
             item.update(status='placeholder', reason='제품명·맛 평가·결론을 실제 내용으로 채워 주세요.')
         else:
             query = normalized(line)
-            matches = [m for transcript in transcripts if (m := transcript.find(query, used[transcript.asset['id']]))]
+            matches = [m for transcript in transcripts if (m := transcript.find(query, used[transcript.asset['id']], check))]
             matches.sort(key=lambda m: (not assets[m['asset_id']]['metadata'].get('has_video',True),m['score'],m['confidence']), reverse=True)
             if matches:
                 match = matches[0]
@@ -185,7 +187,7 @@ def assemble(brief, state, assets, voice_mode='auto'):
                                 tags = re.split(r'[\s_.-]+', video['name'].rsplit('.',1)[0])
                                 return sum(len(tag) for tag in tags if len(tag)>=2 and normalized(tag) in normalized(line+' '+brief.directions))
                             preferred = max(videos, key=shot_score)
-                            corresponding = [m for t in transcripts if t.asset['metadata'].get('has_video',True) and (m:=t.find(query,[]))]
+                            corresponding = [m for t in transcripts if t.asset['metadata'].get('has_video',True) and (m:=t.find(query,[],check))]
                             corresponding.sort(key=lambda m:(m['score'],m['confidence']),reverse=True)
                             visual = preferred if shot_score(preferred) else assets[corresponding[0]['asset_id']] if corresponding else videos[i % len(videos)]
                             visual_start = max(0,corresponding[0]['start']+start-match['start']) if corresponding and not shot_score(preferred) else 0

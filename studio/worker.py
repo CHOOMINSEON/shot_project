@@ -351,14 +351,21 @@ def edit_script(ident, payload):
         assets={a:db.get_asset(a) for a in payload['asset_ids']}
         update(ident,.35,'대본 순서대로 실제 구간 연결 · 연출 적용')
         with db.connection() as conn:
+            snapshot=conn.execute('SELECT state,revision FROM projects WHERE id=?',(job['project_id'],)).fetchone()
+        if snapshot['revision']!=payload['revision']:
+            raise ValueError('대사 분석 중 편집이 변경되어 원본 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
+        before=json.loads(snapshot['state'])
+        # Matching can scan hours of speech; do CPU work outside SQLite's write lock.
+        state=script_edit.assemble(script_edit.Brief.model_validate(payload['brief']),before,assets,
+                                   payload['voice_mode'],check=lambda:check_cancel(ident))
+        check_cancel(ident)
+        with db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row=conn.execute('SELECT state,revision FROM projects WHERE id=?',(job['project_id'],)).fetchone()
             if row['revision']!=payload['revision']:
                 raise ValueError('대사 분석 중 편집이 변경되어 원본 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
             if STOP.is_set() or conn.execute('SELECT cancel FROM jobs WHERE id=?',(ident,)).fetchone()['cancel']:
                 raise Cancelled()
-            before=json.loads(row['state'])
-            state=script_edit.assemble(script_edit.Brief.model_validate(payload['brief']),before,assets,payload['voice_mode'])
             result={'applied':bool(state['clips']), **state['script_edit'],'files':[],'preview':True,
                     'matched':sum(r['status']=='matched' for r in state['script_edit']['lines']),
                     'total':len(state['script_edit']['lines'])}

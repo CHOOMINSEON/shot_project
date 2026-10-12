@@ -185,3 +185,27 @@ def test_korean_store_and_counts_match_across_separate_asr_words_without_truncat
     assert value['script_edit']['lines'][0]['end']==pytest.approx(5.4)
     value=script_edit.assemble(script_edit.Brief(script='CU'),state(),{'v':source})
     assert value['script_edit']['lines'][0]['end']==1.2
+
+
+def test_matching_is_cancellable_and_keeps_input_state_unchanged():
+    from studio.media import Cancelled
+    source=transcript();original=state()
+    def cancel():raise Cancelled()
+    with pytest.raises(Cancelled):
+        script_edit.assemble(script_edit.Brief(script='빠르게 먹어볼게요!'),original,{'v':source},check=cancel)
+    assert original==state()
+
+
+def test_matching_does_not_hold_database_write_lock_and_rechecks_revision(owner,sample,monkeypatch):
+    p,asset_id=upload_video(owner,sample);cached(asset_id,transcript()['analysis']['words'])
+    assemble=script_edit.assemble
+    def concurrent_edit(*args,**kwargs):
+        with db.connection() as conn:
+            conn.execute('UPDATE projects SET name=?,revision=revision+1 WHERE id=?',('매칭 중 다른 탭 변경',p['id']))
+        return assemble(*args,**kwargs)
+    monkeypatch.setattr(script_edit,'assemble',concurrent_edit)
+    response=owner.post(f'/api/projects/{p["id"]}/script-edit',json={'revision':p['revision'],'brief':{'script':'빠르게 먹어볼게요!'}})
+    job=wait_job(owner,response.json()['job_id'])
+    assert job['status']=='failed' and '변경' in job['message']
+    current=owner.get('/api/projects/'+p['id']).json()
+    assert current['name']=='매칭 중 다른 탭 변경' and current['duration']==8
