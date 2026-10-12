@@ -156,3 +156,21 @@ def test_very_low_confidence_recognition_is_not_automatically_used():
     source=transcript(confidence=.2)
     value=script_edit.assemble(script_edit.Brief(script='빠르게 먹어볼게요!'),state(),{'v':source})
     assert value['clips']==[] and value['script_edit']['lines'][0]['status']=='missing'
+
+
+def test_punctuation_only_lines_do_not_crash_or_match_arbitrary_footage():
+    source=transcript()
+    value=script_edit.assemble(script_edit.Brief(script='...\n빠르게 먹어볼게요!'),state(),{'v':source})
+    assert [r['status'] for r in value['script_edit']['lines']]==['missing','matched']
+    assert not value['script_edit']['complete'] and len(value['clips'])==1
+
+
+def test_switching_to_dubbing_does_not_attach_another_sources_caption_edit():
+    video=transcript();audio=transcript('voice');audio['metadata']['has_video']=False
+    assets={'v':video,'voice':audio};brief=script_edit.Brief(script='과연 찾아다닐 만큼 맛있을까?')
+    original=script_edit.assemble(brief,state(),assets,voice_mode='original')
+    original['captions']=timeline.generate_captions(original,assets)
+    original['captions']['items'][0].update(text='이전 원음에서만 검수한 문구',edited=True)
+    dubbed=script_edit.assemble(brief,original,assets,voice_mode='dubbing')
+    assert dubbed['captions']['items'][0]['text']!='이전 원음에서만 검수한 문구'
+    assert dubbed['captions']['archived_edits'][0]['text']=='이전 원음에서만 검수한 문구'

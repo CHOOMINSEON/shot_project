@@ -65,6 +65,8 @@ class Transcript:
             self.grams[self.text[i:i+3]].append(i)
 
     def find(self, query, used):
+        if not query or not self.words:
+            return None
         votes = Counter()
         exact = self.text.find(query)
         while exact >= 0:
@@ -159,7 +161,7 @@ def assemble(brief, state, assets, voice_mode='auto'):
                 effective = [part for c in cuts for part in timeline.subtract([c['start'],c['end']], protections)]
                 for index,(start,end) in enumerate(timeline.subtract([a,b],effective)):
                     if end-start >= 1/state.get('fps',30):
-                        clip = {'id': f'script-{i+1}-{index}', 'asset_id': source['id'], 'start': start, 'end': end,
+                        clip = {'id': f'script-{i+1}-{source["id"]}-{index}', 'asset_id': source['id'], 'start': start, 'end': end,
                                 'label': f'{i+1}. {line[:45]}', 'frame': frame, 'script_line': i+1}
                         if use_dubbing and videos:
                             def shot_score(video):
