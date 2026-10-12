@@ -379,6 +379,56 @@ class Cuts(BaseModel):
     restore: bool = False
 
 
+class AutoCut(BaseModel):
+    revision: StrictInt
+    asset_id: str
+    threshold_db: float = Field(default=-40, ge=-70, le=-15, allow_inf_nan=False)
+    minimum: float = Field(default=.6, ge=.1, le=10, allow_inf_nan=False)
+    before: float = Field(default=.12, ge=0, le=2, allow_inf_nan=False)
+    after: float = Field(default=.2, ge=0, le=2, allow_inf_nan=False)
+
+
+@app.post('/api/projects/{ident}/auto-cut')
+def auto_cut(ident: str, body: AutoCut):
+    current = project(ident)
+    if body.revision != current['revision']:
+        raise HTTPException(409, '편집이 변경되었어요. 최신 편집을 불러온 뒤 다시 실행해 주세요.')
+    asset = next((a for a in current['assets'] if a['id'] == body.asset_id and a['status'] == 'ready'), None)
+    if not asset or not any(c['asset_id'] == body.asset_id for c in current['state']['clips']):
+        raise HTTPException(422, '타임라인에 있는 검사 완료 원본을 선택해 주세요.')
+    if not asset['metadata']['has_audio']:
+        raise HTTPException(422, '오디오가 없는 영상은 무음을 판단할 수 없어요. 수동 편집을 사용해 주세요.')
+    # Serialized with the worker's final commit; reject duplicate clicks across tabs.
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        revision = conn.execute('SELECT revision FROM projects WHERE id=?', (ident,)).fetchone()['revision']
+        if revision != body.revision:
+            raise HTTPException(409, '편집이 변경되었어요. 최신 편집을 불러온 뒤 다시 실행해 주세요.')
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='auto_cut' AND status IN ('queued','running')", (ident,)).fetchone():
+            raise HTTPException(409, '무음 자동 편집이 진행 중이에요. 결과를 기다려 주세요.')
+        job_id = db.uid()
+        conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
+                     (job_id, ident, 'auto_cut', 'queued', json.dumps(body.model_dump()), time.time(), time.time()))
+    return {'job_id': job_id}
+
+
+class UndoAutoCut(BaseModel):
+    revision: StrictInt
+
+
+@app.post('/api/projects/{ident}/auto-cut/{job_id}/undo')
+def undo_auto_cut(ident: str, job_id: str, body: UndoAutoCut):
+    current = project(ident)
+    with db.connection() as conn:
+        row = conn.execute("SELECT payload,result FROM jobs WHERE id=? AND project_id=? AND kind='auto_cut'", (job_id, ident)).fetchone()
+    if not row:
+        raise HTTPException(404, '자동 편집 작업을 찾지 못했어요.')
+    payload, result = json.loads(row['payload']), json.loads(row['result'])
+    if not result.get('applied') or current['revision'] != result['revision']:
+        raise HTTPException(409, '자동 편집 이후 변경한 내용이 있어요. 타임라인의 취소 또는 구간 복원을 사용해 주세요.')
+    return save(ident, body.revision, payload['before_state'], current['name'])
+
+
 @app.post('/api/projects/{ident}/cuts')
 def cuts(ident: str, body: Cuts):
     current = project(ident)

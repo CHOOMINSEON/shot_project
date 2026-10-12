@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -13,7 +14,7 @@ import numpy as np
 
 from . import db, timeline, proofreading
 from .media import Cancelled, probe, render_piece, run_ffmpeg
-from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS
+from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
 STOP = threading.Event()
 MODEL = None
@@ -150,6 +151,8 @@ def analyze(ident, payload):
             if key in asset['analysis']:
                 data[key] = asset['analysis'][key]
     with db.connection() as conn:
+        if asset['analysis'].get('silence'):
+            data['silence'] = asset['analysis']['silence']
         conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(data, ensure_ascii=False), asset['id']))
     return {'asset_id': asset['id'], 'candidates': len(data['candidates']), 'words': len(data['words'])}
 
@@ -190,7 +193,7 @@ def render(ident, payload):
                 render_piece(asset_path(asset['id']), clip, asset['metadata'], partial, work,
                              state.get('fps', 30), state.get('quality', 'standard'), preview,
                              lambda: is_cancelled(ident),
-                             lambda p: update(ident, .88 * (elapsed + p * clip_length) / total,
+                             lambda p: update(ident, payload.get('progress_offset', 0) + payload.get('progress_scale', 1) * .88 * (elapsed + p * clip_length) / total,
                                                f'{gi}/{len(groups)} 영상 · 원본 렌더 중'))
                 partial.replace(piece)
             pieces.append(piece)
@@ -238,6 +241,90 @@ def render(ident, payload):
             'render_signature': timeline.render_signature(state), 'preview': preview}
 
 
+def auto_cut(ident, payload):
+    """Acoustic silence, not speech VAD: keep audible food sounds and music."""
+    asset = db.get_asset(payload['asset_id'])
+    work = DATA / 'work' / ident
+    work.mkdir(exist_ok=True)
+    with db.connection() as conn:
+        job = conn.execute('SELECT project_id,result FROM jobs WHERE id=?', (ident,)).fetchone()
+    result = json.loads(job['result'])
+    if not result.get('applied'):
+        length = asset['metadata']['duration']
+        update(ident, 0, '1/3 · 소리 크기로 무음 구간 찾는 중 · 자막 모델 불필요')
+        run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-i', asset_path(asset['id']),
+                    '-map', '0:a:0', '-vn', '-af',
+                    f"silencedetect=noise={payload['threshold_db']}dB:d={payload['minimum']}",
+                    '-f', 'null', '-'], work, lambda: is_cancelled(ident),
+                   lambda p: update(ident, p * .3, '1/3 · 무음 구간 찾는 중'), length)
+        gaps, start = [], None
+        with (work / 'ffmpeg.log').open(encoding='utf-8', errors='replace') as log:
+            for line in log:
+                match = re.search(r'silence_(start|end):\s*([0-9.eE+-]+)', line)
+                if not match:
+                    continue
+                value = max(0, min(length, float(match[2])))
+                if match[1] == 'start':
+                    start = value
+                elif start is not None:
+                    gaps.append([start, value])
+                    start = None
+        if start is not None:
+            gaps.append([start, length])
+        candidates = []
+        for a, b in gaps:
+            a = a + (payload['after'] if a > .001 else 0)
+            b = b - (payload['before'] if b < length - .001 else 0)
+            if b > a:
+                candidates.append({'start': a, 'end': b})
+        check_cancel(ident)
+        update(ident, .32, '2/3 · 무음 자동 삭제 · 보존 구간 유지')
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+            analysis = {**asset['analysis'], 'silence': {'gaps': gaps, 'candidates': candidates,
+                        'threshold_db': payload['threshold_db'], 'minimum': payload['minimum']}}
+            conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(analysis), asset['id']))
+            if row['revision'] != payload['revision']:
+                raise ValueError('분석 중 편집이 변경되어 자동 컷을 적용하지 않았어요. 최신 편집에서 다시 실행해 주세요.')
+            if STOP.is_set() or conn.execute('SELECT cancel FROM jobs WHERE id=?', (ident,)).fetchone()['cancel']:
+                raise Cancelled()
+            before_state = json.loads(row['state'])
+            state = timeline.apply_cuts(json.loads(row['state']), asset['id'], candidates)
+            timeline.validate_state(state, {a['id']: db.get_asset(a['id']) for a in conn.execute('SELECT id FROM assets WHERE project_id=?', (job['project_id'],))})
+            before_length, after_length = timeline.duration(before_state['clips']), timeline.duration(state['clips'])
+            if after_length < 1 / state.get('fps', 30):
+                raise ValueError('영상 전체가 무음으로 감지되어 원본을 유지했어요. 무음 기준을 더 낮추거나 보존 구간을 지정해 주세요.')
+            if len(json.dumps(state, ensure_ascii=False).encode()) > 4 * 1024 * 1024:
+                raise ValueError('편집 정보가 너무 커서 자동 컷을 적용하지 않았어요. 원본을 나눠 주세요.')
+            revision = row['revision'] + 1
+            result = {'applied': True, 'asset_id': asset['id'], 'before_seconds': before_length,
+                      'after_seconds': after_length, 'removed_seconds': max(0, before_length - after_length),
+                      'candidates': len(candidates), 'revision': revision,
+                      'signature': timeline.signature(state), 'render_signature': timeline.render_signature(state),
+                      'preview': True, 'files': []}
+            # Save commit + snapshot atomically so a restart cannot apply the cuts twice.
+            payload = {**payload, 'before_state': before_state, 'render_state': state}
+            conn.execute('UPDATE projects SET state=?,revision=?,updated=? WHERE id=?',
+                         (json.dumps(state, ensure_ascii=False), revision, time.time(), job['project_id']))
+            conn.execute('UPDATE jobs SET payload=?,result=? WHERE id=?',
+                         (json.dumps(payload, ensure_ascii=False), json.dumps(result), ident))
+    state = payload['render_state']
+    if result['after_seconds'] > MAX_OUTPUT_SECONDS:
+        return {**result, 'notice': '자동 컷 적용 완료 · 편집본이 30분을 넘어서 타임라인으로 확인해 주세요. 제품별·컷별 출력이 가능합니다.'}
+    # Cut changes invalidate previous caption timing; the silent-cut preview is text-free.
+    preview_state = {**state, 'captions': {'items': []}}
+    try:
+        exported = render(ident, {'state': preview_state, 'revision': result['revision'],
+                                 'mode': 'full', 'preview': True, 'filename': '무음_자동편집_미리보기',
+                                 'progress_offset': .35, 'progress_scale': .65})
+    except Cancelled:
+        raise
+    except Exception as exc:
+        return {**result, 'notice': '자동 컷은 적용됐어요. 미리보기 파일 생성 실패: ' + str(exc)[:500]}
+    return {**result, **exported}
+
+
 def loop():
     # One worker / one uvicorn process. Durable queued jobs survive a server restart.
     with db.connection() as conn:
@@ -253,7 +340,7 @@ def loop():
         try:
             check_cancel(ident)
             payload = json.loads(row['payload'])
-            result = {'ingest': ingest, 'analyze': analyze, 'render': render}[row['kind']](ident, payload)
+            result = {'ingest': ingest, 'analyze': analyze, 'render': render, 'auto_cut': auto_cut}[row['kind']](ident, payload)
             check_cancel(ident)
             db.update_job(ident, status='completed', progress=1, message='완료', result=result)
             shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)

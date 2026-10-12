@@ -40,8 +40,9 @@ def smoke(base, entry):
         assert cfg['model_name'] == 'medium' and cfg['model_ready']
         path = DATA / 'desktop-smoke-input.mp4'
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
-                        'testsrc2=size=180x320:rate=30:duration=2', '-f', 'lavfi', '-i',
-                        'sine=frequency=440:sample_rate=48000:duration=2', '-c:v', 'libx264',
+                        'testsrc2=size=180x320:rate=30:duration=8', '-f', 'lavfi', '-i',
+                        'sine=frequency=440:sample_rate=48000:duration=8', '-af',
+                        "volume=enable='between(t,2,4)':volume=0", '-c:v', 'libx264',
                         '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', str(path)], check=True)
         project = client.post('/api/projects', json={'name': '실행 파일 검증'}).json()
         upload = client.post(f'/api/projects/{project["id"]}/uploads', json={'name': path.name, 'size': path.stat().st_size}).json()
@@ -60,6 +61,13 @@ def smoke(base, entry):
 
         wait_job(client.post(f'/api/uploads/{upload["id"]}/complete').json()['job_id'])
         project = client.get('/api/projects/' + project['id']).json()
+        cut = client.post('/api/projects/' + project['id'] + '/auto-cut', json={
+            'revision': project['revision'], 'asset_id': upload['id']})
+        assert cut.status_code == 200, cut.text
+        cut_job = wait_job(cut.json()['job_id'])
+        assert 1.3 < cut_job['result']['removed_seconds'] < 2
+        project = client.get('/api/projects/' + project['id']).json()
+        assert 6 < project['duration'] < 6.8 and len(project['state']['clips']) == 2
         response = client.post('/api/projects/' + project['id'] + '/render', json={
             'revision': project['revision'], 'mode': 'full', 'preview': False, 'filename': 'desktop-smoke'})
         assert response.status_code == 200, response.text
@@ -67,7 +75,7 @@ def smoke(base, entry):
         video = next(f for f in job['result']['files'] if f['type'] == 'video')
         response = client.get('/api/exports/' + job['id'] + '/' + video['name'])
         assert response.status_code == 200 and len(response.content) > 1000
-    print('Portable smoke passed: medium/VAD, 10GB/2h settings, auto-login/replay rejection, upload, MP4 export/download.')
+    print('Portable smoke passed: medium/VAD, 10GB/2h settings, auto-login/replay rejection, upload, acoustic silence removal/preview, shortened MP4 export/download.')
 
 
 def run(smoke_test=False):
