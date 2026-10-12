@@ -1,0 +1,13 @@
+{
+	admin off
+}
+
+{$STUDIO_DOMAIN} {
+	request_body {
+		max_size 9MB
+	}
+	reverse_proxy studio:8000 {
+		# Stream chunks and video ranges. Rendering runs in the background queue.
+		flush_interval -1
+	}
+}

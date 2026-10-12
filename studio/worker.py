@@ -1,0 +1,276 @@
+import hashlib
+import json
+import math
+import os
+import shutil
+import threading
+import time
+import wave
+import zipfile
+from pathlib import Path
+
+import numpy as np
+
+from . import db, timeline, proofreading
+from .media import Cancelled, probe, render_piece, run_ffmpeg
+from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS
+
+STOP = threading.Event()
+MODEL = None
+MODEL_ID = None
+
+
+def asset_path(ident):
+    return DATA / 'assets' / ident / 'original'
+
+
+def atomic_json(path, value):
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
+    tmp.replace(path)
+
+
+def is_cancelled(ident):
+    with db.connection() as conn:
+        row = conn.execute('SELECT cancel FROM jobs WHERE id=?', (ident,)).fetchone()
+    return STOP.is_set() or not row or bool(row['cancel'])
+
+
+def check_cancel(ident):
+    if is_cancelled(ident):
+        raise Cancelled()
+
+
+def update(ident, value, message):
+    db.update_job(ident, progress=max(0, min(1, value)), message=message)
+
+
+def load_model(name=None):
+    global MODEL, MODEL_ID
+    name = name or MODEL_NAME
+    if name not in ['tiny', 'base', 'small', 'medium']:
+        raise ValueError('지원하지 않는 음성 인식 모델입니다.')
+    directory = DATA / 'models' / f'whisper-{name}'
+    if name == 'base' and not (directory / 'model.bin').exists():
+        directory = DATA / 'models' / 'whisper'
+    if MODEL is None or MODEL_ID != name:
+        if not (directory / 'model.bin').exists():
+            raise ValueError('음성 인식 모델이 준비되지 않았습니다. 서버에서 scripts/download_model.py를 실행해 주세요. 공백 분석과 수동 편집은 모델 없이 사용할 수 있습니다.')
+        from faster_whisper import WhisperModel
+        MODEL = None
+        MODEL = WhisperModel(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
+        MODEL_ID = name
+    return MODEL
+
+
+def ingest(ident, payload):
+    asset = db.get_asset(payload['asset_id'])
+    path = asset_path(asset['id'])
+    metadata = probe(path)
+    check_cancel(ident)
+    update(ident, .4, '영상 정보 확인 완료 · 대표 이미지 생성')
+    run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-ss', str(min(1, metadata['duration'] / 2)),
+                '-i', path, '-frames:v', '1', '-vf', 'scale=240:-2', '-update', '1', path.parent / 'thumbnail.jpg'],
+               DATA / 'work' / ident, lambda: is_cancelled(ident))
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('UPDATE assets SET status=?,metadata=? WHERE id=?', ('ready', json.dumps(metadata), asset['id']))
+        row = conn.execute('SELECT state,revision FROM projects WHERE id=?', (asset['project_id'],)).fetchone()
+        state = json.loads(row['state'])
+        # Ingest completion is a versioned edit, never an overwrite of newer user state.
+        state['clips'].append({'id': db.uid(), 'asset_id': asset['id'], 'start': 0,
+                               'end': math.floor(metadata['duration'] * state.get('fps', 30)) / state.get('fps', 30), 'label': Path(asset['name']).stem,
+                               'frame': {'mode': 'fit', 'x': .5, 'y': .5, 'zoom': 1}})
+        conn.execute('UPDATE projects SET state=?,revision=revision+1,updated=? WHERE id=?',
+                     (json.dumps(state, ensure_ascii=False), time.time(), asset['project_id']))
+    return {'asset_id': asset['id'], 'metadata': metadata}
+
+
+def analyze(ident, payload):
+    asset = db.get_asset(payload['asset_id'])
+    if asset['status'] != 'ready':
+        raise ValueError('원본 영상 검사가 먼저 완료되어야 합니다.')
+    if not asset['metadata']['has_audio']:
+        raise ValueError('오디오가 없는 영상입니다. 수동 편집을 사용해 주세요.')
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    work = DATA / 'work' / ident
+    work.mkdir(exist_ok=True)
+    checkpoint = work / 'analysis.json'
+    length = asset['metadata']['duration']
+    data = json.loads(checkpoint.read_text()) if checkpoint.exists() else {'speech': [], 'words': [], 'peaks': [], 'next': 0}
+    # Freeze model identity across resumed windows, including checkpoints from the original base version.
+    model_name = data.get('model') or ('base' if data['next'] and data['words'] else payload.get('model', MODEL_NAME))
+    model = (load_model() if model_name == MODEL_NAME else load_model(model_name)) if payload.get('transcribe') else None
+    if model:
+        data['model'] = model_name
+    for start in range(int(data['next']), int(np.ceil(length)), WINDOW_SECONDS):
+        check_cancel(ident)
+        end = min(start + WINDOW_SECONDS, length)
+        # One-second context overlaps; retain words by their midpoint to avoid duplicates.
+        left, right = max(0, start - 1), min(length, end + 1)
+        wav = work / 'audio.wav'
+        update(ident, start / length, f'{int(start)} / {int(length)}초 · 오디오 구간 추출')
+        run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-ss', str(left), '-i', asset_path(asset['id']),
+                    '-t', str(right - left), '-vn', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
+                   work, lambda: is_cancelled(ident))
+        with wave.open(str(wav), 'rb') as audio_file:
+            audio = np.frombuffer(audio_file.readframes(audio_file.getnframes()), dtype='<i2').astype(np.float32) / 32768.
+        speech = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=100, speech_pad_ms=0), sampling_rate=16000)
+        data['speech'] += [[max(start, left + s['start'] / 16000), min(end, left + s['end'] / 16000)]
+                           for s in speech if left + s['start'] / 16000 < end and left + s['end'] / 16000 > start]
+        for sec in np.arange(start, end, .25):
+            chunk = audio[int((sec - left) * 16000):int(min(right, sec + .25) * 16000 - left * 16000)]
+            data['peaks'].append(round(float(np.max(np.abs(chunk))) if len(chunk) else 0., 3))
+        if model:
+            segments, _ = model.transcribe(audio, language='ko', word_timestamps=True, beam_size=5,
+                                          vad_filter=True, initial_prompt=payload.get('vocabulary', '')[:1000],
+                                          hotwords=payload.get('vocabulary', '')[:1000],
+                                          condition_on_previous_text=False, hallucination_silence_threshold=1.)
+            for segment in segments:
+                check_cancel(ident)
+                for word in segment.words or []:
+                    a, b = float(left + word.start), float(left + word.end)
+                    if start <= (a + b) / 2 < end and b > a:
+                        data['words'].append({'id': f'w{len(data["words"])}', 'start': a, 'end': min(length, b),
+                                              'text': word.word, 'confidence': round(float(word.probability), 4),
+                                              'review': bool(word.probability < .85)})
+        data['next'] = start + WINDOW_SECONDS
+        atomic_json(checkpoint, data)
+        wav.unlink(missing_ok=True)
+        del audio
+    data['speech'] = timeline.merge_intervals(data['speech'])
+    data['candidates'] = timeline.cut_candidates(data['speech'], length)
+    data['products'] = timeline.product_candidates(data['words'], payload.get('names', []), length) if model else []
+    data['transcribed'] = bool(model)
+    # A VAD-only re-run must not erase a previously completed transcript.
+    if not model:
+        for key in ['words', 'products', 'transcribed', 'model']:
+            if key in asset['analysis']:
+                data[key] = asset['analysis'][key]
+    with db.connection() as conn:
+        conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(data, ensure_ascii=False), asset['id']))
+    return {'asset_id': asset['id'], 'candidates': len(data['candidates']), 'words': len(data['words'])}
+
+
+def render(ident, payload):
+    state = payload['state']  # Frozen revision; subsequent edits cannot mutate this export.
+    preview = payload.get('preview', False)
+    groups = timeline.export_groups(state, payload.get('mode', 'full'))
+    captions = state.get('captions', {})
+    if captions.get('items') and captions.get('signature') != timeline.signature(state):
+        raise ValueError('컷이 변경되어 자막 동기화가 필요합니다. 자막을 다시 생성·검토해 주세요.')
+    items = captions.get('items', [])
+    timeline.validate_captions(items, timeline.duration(state['clips']))
+    if not preview:
+        proofreading.require_review(items)
+    work, target = DATA / 'work' / ident, DATA / 'exports' / ident
+    work.mkdir(exist_ok=True)
+    target.mkdir(exist_ok=True)
+    total = timeline.duration(state['clips'])
+    estimate = total * (4_000_000 if not preview else 500_000) * (3 if not preview else 2) + 512 * 1024 * 1024
+    if shutil.disk_usage(DATA).free < estimate:
+        raise ValueError('대기 중 서버 저장 공간이 줄었습니다. 출력 파일을 정리하거나 저장 공간을 늘린 뒤 재시도해 주세요.')
+    elapsed = 0.
+    file_list, edit_list = [], []
+    base = payload['filename']
+    for gi, (label, clips) in enumerate(groups, 1):
+        pieces = []
+        group_start = elapsed
+        for clip in clips:
+            check_cancel(ident)
+            asset = db.get_asset(clip['asset_id'])
+            key = hashlib.sha256(json.dumps([clip, state.get('fps', 30), state.get('quality', 'standard'), preview], sort_keys=True).encode()).hexdigest()
+            piece = work / f'{key}.mp4'
+            clip_length = clip['end'] - clip['start']
+            if not piece.exists():
+                partial = work / f'{key}.partial.mp4'
+                partial.unlink(missing_ok=True)
+                render_piece(asset_path(asset['id']), clip, asset['metadata'], partial, work,
+                             state.get('fps', 30), state.get('quality', 'standard'), preview,
+                             lambda: is_cancelled(ident),
+                             lambda p: update(ident, .88 * (elapsed + p * clip_length) / total,
+                                               f'{gi}/{len(groups)} 영상 · 원본 렌더 중'))
+                partial.replace(piece)
+            pieces.append(piece)
+            edit_list.append({'asset_id': asset['id'], 'source_name': asset['name'], 'label': label,
+                              'original_start': clip['start'], 'original_end': clip['end'],
+                              'edited_start': elapsed, 'edited_end': elapsed + clip_length, 'frame': clip.get('frame', {})})
+            elapsed += clip_length
+        prefix = base if len(groups) == 1 else f'{gi:03}_{base}'
+        output = target / f'{prefix}.mp4'
+        concat = work / 'concat.txt'
+        concat.write_text(''.join(f"file '{p.as_posix()}'\n" for p in pieces))
+        run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '0', '-i', concat,
+                    '-c', 'copy', '-movflags', '+faststart', output], work, lambda: is_cancelled(ident))
+        rendered_info = probe(output)
+        if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
+            raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')
+        file_list.append({'name': output.name, 'size': output.stat().st_size, 'label': label, 'type': 'video'})
+        if not preview:
+            local = timeline.local_captions(items, group_start, elapsed)
+            if local or len(groups) == 1:
+                subtitle = target / f'{prefix}.srt'
+                subtitle.write_text(timeline.srt(local, elapsed - group_start), encoding='utf-8')
+                file_list.append({'name': subtitle.name, 'size': subtitle.stat().st_size, 'label': label, 'type': 'subtitle'})
+    if not preview:
+        manifest = {'revision': payload['revision'], 'timeline_signature': timeline.signature(state), 'mode': payload['mode'],
+                    'clips': edit_list, 'notice': '캡컷 프로젝트 파일이 아닌 참고·복원용 편집 목록입니다.'}
+        atomic_json(target / 'edit-list.json', manifest)
+        file_list.append({'name': 'edit-list.json', 'size': (target / 'edit-list.json').stat().st_size, 'type': 'manifest'})
+        if len(groups) > 1 and items:
+            combined = target / f'{base}_전체연결용.srt'
+            combined.write_text(timeline.srt(items, total), encoding='utf-8')
+            file_list.append({'name': combined.name, 'size': combined.stat().st_size, 'type': 'subtitle'})
+        update(ident, .93, 'MP4·SRT·편집 목록 ZIP 생성 중')
+        archive = target / f'{base}.zip'
+        # ZIP_STORED avoids recompressing H.264; file data is copied in fixed-size blocks, including ZIP64.
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zipped:
+            for entry in list(file_list):
+                with (target / entry['name']).open('rb') as source, zipped.open(entry['name'], 'w', force_zip64=True) as destination:
+                    while chunk := source.read(1024 * 1024):
+                        check_cancel(ident)
+                        destination.write(chunk)
+        file_list.append({'name': archive.name, 'size': archive.stat().st_size, 'type': 'archive'})
+    return {'files': file_list, 'revision': payload['revision'], 'signature': timeline.signature(state),
+            'render_signature': timeline.render_signature(state), 'preview': preview}
+
+
+def loop():
+    # One worker / one uvicorn process. Durable queued jobs survive a server restart.
+    with db.connection() as conn:
+        conn.execute("UPDATE jobs SET status='queued',message='서버 재시작 후 작업 재개' WHERE status='running'")
+    while not STOP.wait(.3):
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created LIMIT 1").fetchone()
+            if not row:
+                continue
+            ident = row['id']
+            conn.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), ident))
+        try:
+            check_cancel(ident)
+            payload = json.loads(row['payload'])
+            result = {'ingest': ingest, 'analyze': analyze, 'render': render}[row['kind']](ident, payload)
+            check_cancel(ident)
+            db.update_job(ident, status='completed', progress=1, message='완료', result=result)
+            shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)
+        except Cancelled:
+            if STOP.is_set():
+                db.update_job(ident, status='queued', message='서버가 다시 시작하면 재개합니다.')
+            else:
+                db.update_job(ident, status='cancelled', message='작업을 취소했습니다.')
+                shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)
+            shutil.rmtree(DATA / 'exports' / ident, ignore_errors=True)
+        except Exception as exc:
+            db.update_job(ident, status='failed', message=str(exc)[:3000])
+            shutil.rmtree(DATA / 'exports' / ident, ignore_errors=True)
+            if row['kind'] == 'ingest':
+                with db.connection() as conn:
+                    conn.execute("UPDATE assets SET status='invalid' WHERE id=?", (json.loads(row['payload'])['asset_id'],))
+
+
+def start():
+    STOP.clear()
+    thread = threading.Thread(target=loop, daemon=True, name='studio-worker')
+    thread.start()
+    return thread

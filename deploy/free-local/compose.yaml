@@ -1,0 +1,33 @@
+name: iyoring-free-local
+services:
+  studio:
+    image: iyoring-cut-studio:free-local
+    build: ../..
+    command: ["bash", "/run/start_with_model.sh"]
+    restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - studio-data:/data
+      - ../../scripts/start_with_model.sh:/run/start_with_model.sh:ro
+    environment:
+      STUDIO_PASSWORD: ${STUDIO_PASSWORD:?Run the start script to set your password}
+      STUDIO_WHISPER_MODEL: medium
+      STUDIO_FFMPEG_THREADS: "2"
+      STUDIO_JOB_TIMEOUT_SECONDS: "86400"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 30m
+    stop_grace_period: 30s
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.0
+    command: ["tunnel", "--no-autoupdate", "--url", "http://studio:8000"]
+    restart: unless-stopped
+    depends_on:
+      studio:
+        condition: service_healthy
+volumes:
+  studio-data:

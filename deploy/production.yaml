@@ -1,0 +1,42 @@
+name: iyoring-studio
+services:
+  studio:
+    image: iyoring-cut-studio:${STUDIO_RELEASE:?Set a unique release label}
+    build: ..
+    restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - studio-data:/data
+    environment:
+      STUDIO_PASSWORD: ${STUDIO_PASSWORD:?Set an owner password of at least 12 characters}
+      STUDIO_WHISPER_MODEL: ${STUDIO_WHISPER_MODEL:-medium}
+      STUDIO_FFMPEG_THREADS: "2"
+      STUDIO_JOB_TIMEOUT_SECONDS: "86400"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 30s
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      STUDIO_DOMAIN: ${STUDIO_DOMAIN:?Set the DNS hostname pointing to this server}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      studio:
+        condition: service_healthy
+volumes:
+  studio-data:
+  caddy-data:
+  caddy-config:
