@@ -29,6 +29,7 @@ with sync_playwright() as playwright:
     page.locator('#clip-end').fill('4')
     page.locator('#clip-save').click()
     page.wait_for_function("() => document.querySelector('#total-time').textContent === '00:04'")
+    page.locator('#advanced-edit').evaluate('(e) => e.open = true')
     page.locator('[data-tab=captions]').click()
     page.locator('#add-caption').click()
     page.wait_for_selector('[data-caption-text]')

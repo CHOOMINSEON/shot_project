@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock
 from pydantic import BaseModel, Field, StrictInt
 
-from . import db, timeline, worker, planning, proofreading, storage
+from . import db, timeline, worker, planning, proofreading, storage, script_edit
 from .settings import CHUNK_BYTES, DATA, MAX_FILE_BYTES, MAX_INPUT_SECONDS, MAX_OUTPUT_SECONDS, MODEL_DIR, MODEL_NAME, ROOT
 
 LOCKS = {}
@@ -196,6 +196,8 @@ def save(ident, revision, state, name):
     timeline.validate_state(state, {a['id']: a for a in current['assets']})
     if state.get('planning'):
         planning.validate_plan(state['planning'])
+    if state.get('script_brief'):
+        script_edit.Brief.model_validate(state['script_brief'])
     captions = state.get('captions', {})
     if captions.get('signature') == timeline.signature(state):
         timeline.validate_captions(captions.get('items', []), timeline.duration(state['clips']))
@@ -340,12 +342,19 @@ def video(ident: str):
     asset = db.get_asset(ident)
     if asset['status'] != 'ready':
         raise HTTPException(409, '영상 검사가 완료되지 않았습니다.')
-    return FileResponse(worker.asset_path(ident), media_type='video/mp4' if asset['metadata']['codec'] in ['h264', 'hevc'] else 'video/webm')
+    if not asset['metadata'].get('has_video', True):
+        fmt=asset['metadata'].get('format','')
+        mime='audio/wav' if fmt=='wav' else 'audio/mpeg' if fmt=='mp3' else 'audio/flac' if fmt=='flac' else 'audio/ogg' if fmt=='ogg' else 'audio/mp4' if 'mov' in fmt else 'audio/aac'
+    else:
+        mime='video/mp4' if asset['metadata']['codec'] in ['h264','hevc'] else 'video/webm'
+    return FileResponse(worker.asset_path(ident),media_type=mime)
 
 
 @app.get('/api/assets/{ident}/thumbnail')
 def thumbnail(ident: str):
-    db.get_asset(ident)
+    asset = db.get_asset(ident)
+    if asset['status']=='ready' and not asset['metadata'].get('has_video', True):
+        return Response('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#ededed"/><text x="120" y="95" text-anchor="middle" font-size="48" fill="#555">♫</text></svg>',media_type='image/svg+xml')
     path = DATA / 'assets' / ident / 'thumbnail.jpg'
     if not path.exists():
         raise HTTPException(404)
@@ -388,6 +397,41 @@ class AutoCut(BaseModel):
     after: float = Field(default=.2, ge=0, le=2, allow_inf_nan=False)
 
 
+class ScriptEdit(BaseModel):
+    revision: StrictInt
+    brief: script_edit.Brief
+    voice_mode: str = Field(default='auto', pattern='^(auto|original|dubbing)$')
+
+
+@app.post('/api/projects/{ident}/script-edit')
+def edit_script(ident: str, body: ScriptEdit, request: Request):
+    current = project(ident)
+    assets = [a for a in current['assets'] if a['status']=='ready']
+    if not any(a['metadata'].get('has_video',True) for a in assets):
+        raise HTTPException(422, '촬영 영상을 먼저 올려 주세요. 더빙 파일만으로는 화면을 만들 수 없어요.')
+    if any(a['status'] in ['checking','uploading'] for a in current['assets']):
+        raise HTTPException(409, '원본·더빙 업로드와 검사가 끝나면 실행해 주세요.')
+    dubbing = [a for a in assets if not a['metadata'].get('has_video',True)]
+    chosen = dubbing if body.voice_mode=='dubbing' else [a for a in assets if a['metadata'].get('has_video',True)] if body.voice_mode=='original' else assets
+    chosen = [a for a in chosen if a['metadata']['has_audio']]
+    if not chosen:
+        raise HTTPException(422, '대사를 들을 수 있는 원본 또는 직접 녹음한 더빙 파일을 올려 주세요.')
+    setup = getattr(request.app.state,'desktop_setup',None)
+    if any(not a['analysis'].get('transcribed') for a in chosen) and ((setup and setup.snapshot()['status']!='ready') or not (MODEL_DIR/'model.bin').exists()):
+        raise HTTPException(503, '대본을 실제 음성과 맞추려면 자막 모델 준비가 필요해요. 상단 준비 완료 후 실행해 주세요.')
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute('SELECT revision FROM projects WHERE id=?',(ident,)).fetchone()['revision']!=body.revision:
+            raise HTTPException(409,'편집이 변경되었어요. 최신 편집에서 다시 실행해 주세요.')
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit') AND status IN ('queued','running')",(ident,)).fetchone():
+            raise HTTPException(409,'자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
+        job_id=db.uid()
+        payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in chosen], 'model':MODEL_NAME}
+        conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
+                     (job_id,ident,'script_edit','queued',json.dumps(payload,ensure_ascii=False),time.time(),time.time()))
+    return {'job_id':job_id}
+
+
 @app.post('/api/projects/{ident}/auto-cut')
 def auto_cut(ident: str, body: AutoCut):
     current = project(ident)
@@ -404,7 +448,7 @@ def auto_cut(ident: str, body: AutoCut):
         revision = conn.execute('SELECT revision FROM projects WHERE id=?', (ident,)).fetchone()['revision']
         if revision != body.revision:
             raise HTTPException(409, '편집이 변경되었어요. 최신 편집을 불러온 뒤 다시 실행해 주세요.')
-        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='auto_cut' AND status IN ('queued','running')", (ident,)).fetchone():
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit') AND status IN ('queued','running')", (ident,)).fetchone():
             raise HTTPException(409, '무음 자동 편집이 진행 중이에요. 결과를 기다려 주세요.')
         job_id = db.uid()
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
@@ -420,7 +464,7 @@ class UndoAutoCut(BaseModel):
 def undo_auto_cut(ident: str, job_id: str, body: UndoAutoCut):
     current = project(ident)
     with db.connection() as conn:
-        row = conn.execute("SELECT payload,result FROM jobs WHERE id=? AND project_id=? AND kind='auto_cut'", (job_id, ident)).fetchone()
+        row = conn.execute("SELECT payload,result FROM jobs WHERE id=? AND project_id=? AND kind IN ('auto_cut','script_edit')", (job_id, ident)).fetchone()
     if not row:
         raise HTTPException(404, '자동 편집 작업을 찾지 못했어요.')
     payload, result = json.loads(row['payload']), json.loads(row['result'])
@@ -558,6 +602,8 @@ def render(ident: str, body: Render):
     current = project(ident)
     if body.revision != current['revision']:
         raise HTTPException(409, '최신 편집 버전으로 다시 요청해 주세요.')
+    if not body.preview and current['state'].get('script_edit') and not current['state']['script_edit'].get('complete'):
+        raise HTTPException(409, '대본의 빈칸·못 찾은 대사를 확인하고 다시 자동 편집해 주세요. 현재 결과는 부분 미리보기입니다.')
     groups = timeline.export_groups(current['state'], body.mode)
     captions = current['state'].get('captions', {})
     if captions.get('items') and captions.get('signature') != current['signature']:

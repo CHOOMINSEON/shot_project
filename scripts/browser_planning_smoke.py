@@ -26,6 +26,7 @@ with sync_playwright() as playwright:
     page.wait_for_function("(name) => document.querySelector('#workspace-name').textContent === name", arg=project_name)
     page.locator('#upload').set_input_files('/tmp/iyoring-sample.mp4')
     page.wait_for_function("() => document.querySelectorAll('[data-clip]').length === 1", timeout=30000)
+    page.locator('#advanced-edit').evaluate('(e) => e.open = true')
     page.locator('[data-tab=planning]').click()
     page.locator('#plan-subject').fill('검증용 쿠키')
     page.locator('#plan-question').fill('두께가 다르면 식감도 다를까?')

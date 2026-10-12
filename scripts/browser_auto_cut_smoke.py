@@ -17,6 +17,7 @@ with sync_playwright() as playwright:
     page.locator('#upload').set_input_files('/tmp/iyoring-sample.mp4')
     page.wait_for_function("() => !document.querySelector('#auto-cut').disabled", timeout=30000)
     assert page.locator('#analyze').is_disabled()  # No Whisper model in this disposable server.
+    page.locator('.optional-silence').evaluate('(e) => e.open = true')
     page.locator('#auto-cut').click()
     page.wait_for_function("() => document.querySelector('#quick-status').textContent.includes('자동 편집 완료')", timeout=60000)
     assert '삭제' in page.locator('#quick-status').inner_text()

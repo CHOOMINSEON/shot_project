@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, timeline, proofreading
+from . import db, timeline, proofreading, script_edit
 from .media import Cancelled, probe, render_piece, run_ffmpeg
 from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
@@ -69,10 +69,11 @@ def load_model(name=None):
 def ingest(ident, payload):
     asset = db.get_asset(payload['asset_id'])
     path = asset_path(asset['id'])
-    metadata = probe(path)
+    metadata = probe(path, allow_audio=True)
     check_cancel(ident)
     update(ident, .4, '영상 정보 확인 완료 · 대표 이미지 생성')
-    run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-ss', str(min(1, metadata['duration'] / 2)),
+    if metadata['has_video']:
+        run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-ss', str(min(1, metadata['duration'] / 2)),
                 '-i', path, '-frames:v', '1', '-vf', 'scale=240:-2', '-update', '1', path.parent / 'thumbnail.jpg'],
                DATA / 'work' / ident, lambda: is_cancelled(ident))
     with db.connection() as conn:
@@ -81,7 +82,8 @@ def ingest(ident, payload):
         row = conn.execute('SELECT state,revision FROM projects WHERE id=?', (asset['project_id'],)).fetchone()
         state = json.loads(row['state'])
         # Ingest completion is a versioned edit, never an overwrite of newer user state.
-        state['clips'].append({'id': db.uid(), 'asset_id': asset['id'], 'start': 0,
+        if metadata['has_video']:
+            state['clips'].append({'id': db.uid(), 'asset_id': asset['id'], 'start': 0,
                                'end': math.floor(metadata['duration'] * state.get('fps', 30)) / state.get('fps', 30), 'label': Path(asset['name']).stem,
                                'frame': {'mode': 'fit', 'x': .5, 'y': .5, 'zoom': 1}})
         conn.execute('UPDATE projects SET state=?,revision=revision+1,updated=? WHERE id=?',
@@ -97,7 +99,9 @@ def analyze(ident, payload):
         raise ValueError('오디오가 없는 영상입니다. 수동 편집을 사용해 주세요.')
     from faster_whisper.vad import VadOptions, get_speech_timestamps
     work = DATA / 'work' / ident
-    work.mkdir(exist_ok=True)
+    if payload.get('script_asset_checkpoint'):
+        work = work / payload['asset_id']
+    work.mkdir(parents=True, exist_ok=True)
     checkpoint = work / 'analysis.json'
     length = asset['metadata']['duration']
     data = json.loads(checkpoint.read_text(encoding='utf-8')) if checkpoint.exists() else {'speech': [], 'words': [], 'peaks': [], 'next': 0}
@@ -167,6 +171,8 @@ def render(ident, payload):
     items = captions.get('items', [])
     timeline.validate_captions(items, timeline.duration(state['clips']))
     if not preview:
+        if state.get('script_edit') and not state['script_edit'].get('complete'):
+            raise ValueError('대본의 빈칸·못 찾은 대사를 먼저 확인해 주세요.')
         proofreading.require_review(items)
     work, target = DATA / 'work' / ident, DATA / 'exports' / ident
     work.mkdir(exist_ok=True)
@@ -184,6 +190,7 @@ def render(ident, payload):
         for clip in clips:
             check_cancel(ident)
             asset = db.get_asset(clip['asset_id'])
+            visual = db.get_asset(clip['visual_asset_id']) if clip.get('visual_asset_id') else None
             key = hashlib.sha256(json.dumps([clip, state.get('fps', 30), state.get('quality', 'standard'), preview], sort_keys=True).encode()).hexdigest()
             piece = work / f'{key}.mp4'
             clip_length = clip['end'] - clip['start']
@@ -194,12 +201,15 @@ def render(ident, payload):
                              state.get('fps', 30), state.get('quality', 'standard'), preview,
                              lambda: is_cancelled(ident),
                              lambda p: update(ident, payload.get('progress_offset', 0) + payload.get('progress_scale', 1) * .88 * (elapsed + p * clip_length) / total,
-                                               f'{gi}/{len(groups)} 영상 · 원본 렌더 중'))
+                                               f'{gi}/{len(groups)} 영상 · 원본 렌더 중'),
+                             asset_path(visual['id']) if visual else None, visual['metadata'] if visual else None)
                 partial.replace(piece)
             pieces.append(piece)
             edit_list.append({'asset_id': asset['id'], 'source_name': asset['name'], 'label': label,
                               'original_start': clip['start'], 'original_end': clip['end'],
-                              'edited_start': elapsed, 'edited_end': elapsed + clip_length, 'frame': clip.get('frame', {})})
+                              'edited_start': elapsed, 'edited_end': elapsed + clip_length, 'frame': clip.get('frame', {}),
+                              'visual_asset_id': clip.get('visual_asset_id'), 'visual_source_name': visual['name'] if visual else None,
+                              'visual_start': clip.get('visual_start',0)})
             elapsed += clip_length
         prefix = base if len(groups) == 1 else f'{gi:03}_{base}'
         output = target / f'{prefix}.mp4'
@@ -325,6 +335,53 @@ def auto_cut(ident, payload):
     return {**result, **exported}
 
 
+def edit_script(ident, payload):
+    with db.connection() as conn:
+        job=conn.execute('SELECT project_id,result FROM jobs WHERE id=?',(ident,)).fetchone()
+    result=json.loads(job['result'])
+    if not result.get('applied'):
+        for index, asset_id in enumerate(payload['speech_ids']):
+            check_cancel(ident)
+            asset=db.get_asset(asset_id)
+            if not asset['analysis'].get('transcribed'):
+                update(ident,0,f'{index+1}/{len(payload["speech_ids"])} · 실제 대사 인식: {asset["name"]}')
+                analyze(ident,{'asset_id':asset_id,'transcribe':True,'model':payload['model'],
+                               'script_asset_checkpoint':True,'vocabulary':'','names':[]})
+        check_cancel(ident)
+        assets={a:db.get_asset(a) for a in payload['asset_ids']}
+        update(ident,.35,'대본 순서대로 실제 구간 연결 · 연출 적용')
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row=conn.execute('SELECT state,revision FROM projects WHERE id=?',(job['project_id'],)).fetchone()
+            if row['revision']!=payload['revision']:
+                raise ValueError('대사 분석 중 편집이 변경되어 원본 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
+            if STOP.is_set() or conn.execute('SELECT cancel FROM jobs WHERE id=?',(ident,)).fetchone()['cancel']:
+                raise Cancelled()
+            before=json.loads(row['state'])
+            state=script_edit.assemble(script_edit.Brief.model_validate(payload['brief']),before,assets,payload['voice_mode'])
+            result={'applied':bool(state['clips']), **state['script_edit'],'files':[],'preview':True,
+                    'matched':sum(r['status']=='matched' for r in state['script_edit']['lines']),
+                    'total':len(state['script_edit']['lines'])}
+            if not state['clips']:
+                return {**result,'notice':'일치하는 실제 대사가 없어 기존 편집을 유지했어요. 대본과 원음을 확인해 주세요.'}
+            if len(json.dumps(state,ensure_ascii=False).encode())>4*1024*1024:
+                raise ValueError('편집 정보가 너무 큽니다. 대본·원본을 나눠 주세요.')
+            revision=row['revision']+1
+            result.update(revision=revision,signature=timeline.signature(state),render_signature=timeline.render_signature(state),
+                          before_seconds=timeline.duration(before['clips']),after_seconds=timeline.duration(state['clips']))
+            payload={**payload,'before_state':before,'render_state':state}
+            conn.execute('UPDATE projects SET state=?,revision=?,updated=? WHERE id=?',(json.dumps(state,ensure_ascii=False),revision,time.time(),job['project_id']))
+            conn.execute('UPDATE jobs SET payload=?,result=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),json.dumps(result,ensure_ascii=False),ident))
+    try:
+        exported=render(ident,{'state':{**payload['render_state'],'captions':{'items':[]}},'revision':result['revision'],
+                              'mode':'full','preview':True,'filename':'대본_자동편집_미리보기','progress_offset':.4,'progress_scale':.6})
+    except Cancelled:
+        raise
+    except Exception as exc:
+        return {**result,'notice':'대본 컷은 적용됐어요. 미리보기 파일 생성 실패: '+str(exc)[:500]}
+    return {**result,**exported}
+
+
 def loop():
     # One worker / one uvicorn process. Durable queued jobs survive a server restart.
     with db.connection() as conn:
@@ -340,7 +397,7 @@ def loop():
         try:
             check_cancel(ident)
             payload = json.loads(row['payload'])
-            result = {'ingest': ingest, 'analyze': analyze, 'render': render, 'auto_cut': auto_cut}[row['kind']](ident, payload)
+            result = {'ingest': ingest, 'analyze': analyze, 'render': render, 'auto_cut': auto_cut, 'script_edit': edit_script}[row['kind']](ident, payload)
             check_cancel(ident)
             db.update_job(ident, status='completed', progress=1, message='완료', result=result)
             shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)

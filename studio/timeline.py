@@ -28,6 +28,13 @@ def validate_state(state, assets):
         asset = assets.get(clip.get('asset_id'))
         if not asset or asset['status'] != 'ready':
             raise ValueError('검사가 완료된 원본만 편집할 수 있습니다.')
+        visual = assets.get(clip.get('visual_asset_id'))
+        if clip.get('visual_asset_id'):
+            visual_start = clip.get('visual_start', 0)
+            if not visual or visual['status'] != 'ready' or not visual['metadata'].get('has_video', True) or not finite(visual_start) or not 0 <= visual_start < visual['metadata']['duration']:
+                raise ValueError('더빙에 연결할 실제 영상과 시작 시간을 확인해 주세요.')
+        if not asset['metadata'].get('has_video', True) and not visual:
+            raise ValueError('더빙 구간에는 촬영 영상을 연결해 주세요.')
         start, end = clip.get('start'), clip.get('end')
         if not finite(start) or not finite(end) or start < 0 or end <= start or end > asset['metadata']['duration'] + .001:
             raise ValueError('구간 시작·종료 시간을 원본 범위 안에서 설정해 주세요.')

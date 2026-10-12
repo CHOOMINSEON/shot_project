@@ -15,7 +15,7 @@ class Cancelled(Exception):
     pass
 
 
-def probe(path):
+def probe(path, allow_audio=False):
     result = subprocess.run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe',
                              '-show_format', '-show_streams', '-of', 'json', str(path)],
                             capture_output=True, timeout=60)
@@ -23,25 +23,26 @@ def probe(path):
         raise ValueError('영상을 읽을 수 없습니다. 정상적인 MP4·MOV·WebM 파일인지 확인해 주세요.')
     info = json.loads(result.stdout)
     streams = info.get('streams', [])
-    video = next((s for s in streams if s.get('codec_type') == 'video'), None)
-    if not video:
+    video = next((s for s in streams if s.get('codec_type') == 'video' and not s.get('disposition',{}).get('attached_pic')), None)
+    audio = next((s for s in streams if s.get('codec_type') == 'audio'), {})
+    if not video and not (allow_audio and audio):
         raise ValueError('영상 스트림이 없습니다.')
-    duration = float(info.get('format', {}).get('duration', video.get('duration', 0)))
+    duration = float(info.get('format', {}).get('duration', (video or audio).get('duration', 0)))
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError('영상 길이를 확인할 수 없습니다.')
     if duration > MAX_INPUT_SECONDS + .001:
         raise ValueError('원본 영상은 파일당 최대 2시간입니다. 촬영 영상을 나눠 업로드해 주세요.')
     if not any(f in info.get('format', {}).get('format_name', '').split(',')
-               for f in ['mov', 'mp4', 'matroska', 'webm', 'avi', 'mpegts', 'mpeg', 'mxf']):
+               for f in ['mov', 'mp4', 'matroska', 'webm', 'avi', 'mpegts', 'mpeg', 'mxf'] + (['wav', 'mp3', 'aac', 'ogg', 'flac'] if allow_audio else [])):
         raise ValueError('MP4·MOV·WebM 등 일반 영상 컨테이너만 지원합니다.')
     rotation = 0
     dolby = False
-    for side in video.get('side_data_list', []):
+    for side in (video or {}).get('side_data_list', []):
         rotation = side.get('rotation', rotation)
         dolby |= 'DOVI' in side.get('side_data_type', '').upper()
-    audio = next((s for s in streams if s.get('codec_type') == 'audio'), {})
-    return {'duration': duration, 'width': video['width'], 'height': video['height'],
-            'rotation': rotation, 'fps': video.get('avg_frame_rate'), 'codec': video.get('codec_name'),
+    video = video or {}
+    return {'duration': duration, 'width': video.get('width'), 'height': video.get('height'), 'has_video': bool(video),
+            'rotation': rotation, 'fps': video.get('avg_frame_rate'), 'codec': video.get('codec_name', audio.get('codec_name')), 'format': info.get('format',{}).get('format_name',''),
             'transfer': video.get('color_transfer', 'unknown'), 'colorspace': video.get('color_space', 'unknown'),
             'primaries': video.get('color_primaries', 'unknown'), 'dolby_vision': dolby,
             'has_audio': bool(audio), 'sample_rate': audio.get('sample_rate'),
@@ -139,14 +140,19 @@ def frame_filter(metadata, frame, width, height, fps):
     return f'{common},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x111827'
 
 
-def render_piece(source, clip, metadata, output, work, fps, quality, preview, cancelled, progress):
+def render_piece(source, clip, metadata, output, work, fps, quality, preview, cancelled, progress,
+                 visual_source=None, visual_metadata=None):
     width, height = (360, 640) if preview else (1080, 1920)
     length = clip['end'] - clip['start']
     args = ['-protocol_whitelist', 'file,pipe', '-ss', str(clip['start']), '-i', source]
+    video_map = '0:v:0'
+    if visual_source:
+        args += ['-protocol_whitelist', 'file,pipe', '-stream_loop', '-1', '-ss', str(clip.get('visual_start', 0)), '-i', visual_source]
+        video_map = '1:v:0'
     if not metadata['has_audio']:
         args += ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
-    args += ['-t', str(length), '-map', '0:v:0', '-map', '0:a:0' if metadata['has_audio'] else '1:a:0',
-             '-vf', frame_filter(metadata, clip.get('frame', {}), width, height, fps),
+    args += ['-t', str(length), '-map', video_map, '-map', '0:a:0' if metadata['has_audio'] else ('2:a:0' if visual_source else '1:a:0'),
+             '-vf', frame_filter(visual_metadata or metadata, clip.get('frame', {}), width, height, fps),
              '-af', f'aresample=48000:async=1:first_pts=0,apad,afade=t=in:d=0.005,afade=t=out:st={max(0, length - .005)}:d=0.005',
              '-c:v', 'libx264', '-preset', 'ultrafast' if preview else 'fast', '-crf', '25' if preview else ('18' if quality == 'high' else '21'),
              '-maxrate', '30M' if quality == 'high' else '20M', '-bufsize', '60M' if quality == 'high' else '40M',

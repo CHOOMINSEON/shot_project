@@ -75,6 +75,41 @@ def smoke(base, entry):
         video = next(f for f in job['result']['files'] if f['type'] == 'video')
         response = client.get('/api/exports/' + job['id'] + '/' + video['name'])
         assert response.status_code == 200 and len(response.content) > 1000
+        # Explicit pre-aligned fixture: verify the packaged alignment/renderer, not ASR accuracy.
+        from studio import db
+        import json
+        words=[{'id':'a','text':' 과연 찾아다닐 만큼 맛있을까?','start':.5,'end':1.5,'confidence':.99},
+               {'id':'b','text':' 빠르게 먹어볼게요!','start':5,'end':6,'confidence':.99}]
+        with db.connection() as conn:
+            conn.execute('UPDATE assets SET analysis=? WHERE id=?',(json.dumps({'transcribed':True,'words':words}),upload['id']))
+        endpoint='/api/projects/'+project['id']
+        response=client.post(endpoint+'/script-edit',json={'revision':project['revision'],
+                            'brief':{'script':'빠르게 먹어볼게요!\n과연 찾아다닐 만큼 맛있을까?','directions':'첫 문장 클로즈업'}})
+        assert response.status_code==200,response.text
+        aligned=wait_job(response.json()['job_id'])
+        assert aligned['result']['complete'] and aligned['result']['matched']==2
+        project=client.get(endpoint).json()
+        assert project['state']['clips'][0]['start']>4
+        voice=DATA/'desktop-smoke-dubbing.wav'
+        subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',
+                        'sine=frequency=880:sample_rate=48000:duration=8',str(voice)],check=True)
+        dubbing=client.post(endpoint+'/uploads',json={'name':voice.name,'size':voice.stat().st_size}).json()
+        assert client.put(f'/api/uploads/{dubbing["id"]}/chunks/0',content=voice.read_bytes()).status_code==200
+        wait_job(client.post(f'/api/uploads/{dubbing["id"]}/complete').json()['job_id'])
+        with db.connection() as conn:
+            conn.execute('UPDATE assets SET analysis=? WHERE id=?',(json.dumps({'transcribed':True,'words':words[1:]}),dubbing['id']))
+        project=client.get(endpoint).json()
+        response=client.post(endpoint+'/script-edit',json={'revision':project['revision'],
+                            'brief':{'script':'과연 찾아다닐 만큼 맛있을까?\n빠르게 먹어볼게요!'}})
+        assert response.status_code==200,response.text
+        mixed=wait_job(response.json()['job_id'])
+        assert mixed['result']['voice']=='mixed' and mixed['result']['complete']
+        project=client.get(endpoint).json()
+        response=client.post(endpoint+'/render',json={'revision':project['revision'],'filename':'script-dubbing-smoke'})
+        exported=wait_job(response.json()['job_id'])
+        video=next(f for f in exported['result']['files'] if f['type']=='video')
+        assert len(client.get(f'/api/exports/{exported["id"]}/{video["name"]}').content)>1000
+    print('Packaged script workflow passed: pre-aligned fixture, script-order cuts/directing, mixed original/dubbing, actual MP4 export/download.')
     print('Portable smoke passed: medium/VAD, 10GB/2h settings, auto-login/replay rejection, upload, acoustic silence removal/preview, shortened MP4 export/download.')
 
 

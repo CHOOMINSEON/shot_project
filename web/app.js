@@ -9,7 +9,7 @@ const bytes = n => n >= 1e9 ? `${(n/1e9).toFixed(2)} GB` : `${(n/1e6).toFixed(1)
 let project=null, config=null, selected=0, activeAsset=null, history=[], future=[], saveQueue=Promise.resolve(), saving=0;
 let mode='edited', rendered=null, currentJobIds=new Map(), pollTimer=null, uploadAbort=null, uploadPaused=false;
 let contextEnd=null, currentSource=null, pendingSeek=null;
-let desktopTimer=null, latestAuto=null, latestExport=null, quickStarting=false;
+let desktopTimer=null, latestAuto=null, latestExport=null, quickStarting=false, latestScript=null, scriptStarting=false, scriptFormProject=null;
 const captionFindings=new Map();
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').style.display='none',6000);}
 async function api(path, options={}){
@@ -30,7 +30,7 @@ function selectedOffset(){return (project?.state.clips||[]).slice(0,selected).re
 function editedPosition(){if(rendered)return $('player').currentTime;return mode==='source'?$('player').currentTime:Math.max(0,selectedOffset()+$('player').currentTime-(clip()?.start||0));}
 
 async function loadProjects(preferred){const list=await api('/projects');$('projects').innerHTML='<option value="">프로젝트 선택</option>'+list.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');const id=preferred||list[0]?.id;if(id){$('projects').value=id;await loadProject(id);}}
-async function loadProject(id){planFormProject=null;captionFindings.clear();$('player').pause();rendered=null;currentSource=null;project=await api('/projects/'+id);selected=0;activeAsset=project.assets.find(a=>a.status==='ready')?.id||project.assets[0]?.id;history=[];future=[];currentJobIds=new Map();latestAuto=null;latestExport=null;draw();await poll();}
+async function loadProject(id){planFormProject=null;captionFindings.clear();$('player').pause();rendered=null;currentSource=null;project=await api('/projects/'+id);selected=0;activeAsset=project.assets.find(a=>a.status==='ready')?.id||project.assets[0]?.id;history=[];future=[];currentJobIds=new Map();latestAuto=null;latestExport=null;latestScript=null;scriptFormProject=null;draw();await poll();}
 function remember(state){history.push(clone(state));if(history.length>40)history.shift();future=[];}
 function mutate(fn, track=true){
   saving++;
@@ -54,7 +54,7 @@ function draw(){
   const length=editedLength();$('total-time').textContent=clock(length);$('export-duration').textContent=clock(length);$('timeline-end').textContent=clock(length);$('timeline-mid').textContent=clock(length/2);$('clip-count').textContent=`${project.state.clips.length}개 구간`;
   $('timeline-track').innerHTML=project.state.clips.map((c,i)=>`<button class="timeline-clip ${i===selected?'active':''}" data-clip="${i}" style="flex:${Math.max(1,(c.end-c.start)/5)}" title="${esc(c.label)} · ${clock(c.start)}–${clock(c.end)}">${esc(c.label||'유지 구간')} <small>${clock(c.end-c.start)}</small></button>`).join('')||'<span class="muted">유지 구간을 추가하면 편집 타임라인이 생겨요.</span>';
   $('undo').disabled=!history.length;$('redo').disabled=!future.length;drawClip();drawAnalysis();drawCaptions();drawPlanning();waveform();
-  drawQuick();
+  drawQuick();drawScript();
   $('srt-download').href=project?`/api/projects/${project.id}/captions.srt`:'#';
   if(!currentSource && clip())selectClip(selected,false);
 }
@@ -152,19 +152,19 @@ action('quick-play',()=>{const r=latestAuto?.result,video=r?.files?.find(f=>f.ty
 action('quick-export',()=>startRender(false,true));
 action('auto-undo',async()=>{await saveQueue;const old=clone(project.state);project=await api('/projects/'+project.id+'/auto-cut/'+latestAuto.id+'/undo',{method:'POST',body:JSON.stringify({revision:project.revision})});remember(old);rendered=null;currentSource=null;draw();toast('자동 편집 전 타임라인으로 되돌렸어요.');});
 async function poll(){if(!project||$('login-dialog').open)return;const id=project.id,jobs=await api('/jobs?project_id='+id);if(project.id!==id)return;const status={'queued':'대기 중','running':'처리 중','completed':'완료','failed':'실패','cancelled':'취소됨'};let refresh=false, completedAuto=null;
-  latestAuto=jobs.find(j=>j.kind==='auto_cut')||null;latestExport=jobs.find(j=>j.kind==='render'&&!j.result.preview)||null;
-  for(const j of jobs){if(currentJobIds.get(j.id)!==j.status&&['completed','failed','cancelled'].includes(j.status)&&['analyze','ingest','auto_cut'].includes(j.kind)){refresh=true;if(j.kind==='auto_cut'&&j.result.applied&&currentJobIds.has(j.id))completedAuto=j;}if(!saving||!['completed','failed','cancelled'].includes(j.status))currentJobIds.set(j.id,j.status);}
-  $('jobs').innerHTML=jobs.map(j=>`<div class="job"><b>${{ingest:'원본 검사',analyze:'대사·음성 분석',auto_cut:'무음 자동 편집',render:j.result.preview?'렌더 미리보기':'영상 내보내기'}[j.kind]} · ${status[j.status]}</b>${j.result.revision?`<small>편집 버전 ${j.result.revision} ${j.result.revision!==project.revision?'· 현재 편집과 버전이 다릅니다':''}</small>`:''}<div class="progress"><i style="width:${Math.round(j.progress*100)}%"></i></div><small>${esc(j.result.notice||j.message)}</small><div class="button-row">${['queued','running'].includes(j.status)?`<button class="danger" data-cancel-job="${j.id}">취소</button>`:''}${['failed','cancelled'].includes(j.status)?`<button class="secondary" data-retry-job="${j.id}">다시 실행</button>`:''}${(j.result.files||[]).map(f=>f.type==='video'&&j.result.preview?`<button class="secondary" data-preview-job="${j.id}" data-file="${esc(f.name)}" data-signature="${esc(j.result.render_signature)}">편집본 재생</button>`:`<a class="button secondary" href="/api/exports/${j.id}/${encodeURIComponent(f.name)}">${esc(f.name)} · ${bytes(f.size)}</a>`).join('')}${['completed','failed','cancelled'].includes(j.status)&&j.kind==='render'?`<button class="ghost" data-clean-job="${j.id}">출력 정리</button>`:''}</div></div>`).join('')||'<p class="muted">자동 편집 진행과 다운로드가 여기에 표시돼요.</p>';
-  if(refresh&&!saving){const current=await api('/projects/'+id);if(project.id!==id)return;if(completedAuto&&current.revision===completedAuto.result.revision)remember(project.state);project=current;if(completedAuto){selected=0;rendered=null;currentSource=null;}draw();if(completedAuto?.status==='completed'&&completedAuto.result.render_signature===project.render_signature){$('quick-play').click();toast('무음 컷을 적용했어요. 편집본을 확인하고 고화질 MP4를 저장해 주세요.');}}
-  drawQuick();
+  latestScript=jobs.find(j=>j.kind==='script_edit')||null;latestAuto=jobs.find(j=>j.kind==='auto_cut')||null;latestExport=jobs.find(j=>j.kind==='render'&&!j.result.preview)||null;
+  for(const j of jobs){if(currentJobIds.get(j.id)!==j.status&&['completed','failed','cancelled'].includes(j.status)&&['analyze','ingest','auto_cut','script_edit'].includes(j.kind)){refresh=true;if(['auto_cut','script_edit'].includes(j.kind)&&j.result.applied&&currentJobIds.has(j.id))completedAuto=j;}if(!saving||!['completed','failed','cancelled'].includes(j.status))currentJobIds.set(j.id,j.status);}
+  $('jobs').innerHTML=jobs.map(j=>`<div class="job"><b>${{ingest:'원본 검사',analyze:'대사·음성 분석',auto_cut:'무음 자동 편집',script_edit:'대본 자동 편집',render:j.result.preview?'렌더 미리보기':'영상 내보내기'}[j.kind]} · ${status[j.status]}</b>${j.result.revision?`<small>편집 버전 ${j.result.revision} ${j.result.revision!==project.revision?'· 현재 편집과 버전이 다릅니다':''}</small>`:''}<div class="progress"><i style="width:${Math.round(j.progress*100)}%"></i></div><small>${esc(j.result.notice||j.message)}</small><div class="button-row">${['queued','running'].includes(j.status)?`<button class="danger" data-cancel-job="${j.id}">취소</button>`:''}${['failed','cancelled'].includes(j.status)?`<button class="secondary" data-retry-job="${j.id}">다시 실행</button>`:''}${(j.result.files||[]).map(f=>f.type==='video'&&j.result.preview?`<button class="secondary" data-preview-job="${j.id}" data-file="${esc(f.name)}" data-signature="${esc(j.result.render_signature)}">편집본 재생</button>`:`<a class="button secondary" href="/api/exports/${j.id}/${encodeURIComponent(f.name)}">${esc(f.name)} · ${bytes(f.size)}</a>`).join('')}${['completed','failed','cancelled'].includes(j.status)&&j.kind==='render'?`<button class="ghost" data-clean-job="${j.id}">출력 정리</button>`:''}</div></div>`).join('')||'<p class="muted">자동 편집 진행과 다운로드가 여기에 표시돼요.</p>';
+  if(refresh&&!saving){const current=await api('/projects/'+id);if(project.id!==id)return;if(completedAuto&&current.revision===completedAuto.result.revision)remember(project.state);project=current;if(completedAuto){selected=0;rendered=null;currentSource=null;}draw();if(completedAuto?.status==='completed'&&completedAuto.result.render_signature===project.render_signature){$(completedAuto.kind==='script_edit'?'script-play':'quick-play').click();toast(completedAuto.kind==='script_edit'?'대본 순서로 구간을 연결했어요. 찾지 못한 대사와 실제 장면을 확인해 주세요.':'무음 컷을 적용했어요. 편집본을 확인하고 고화질 MP4를 저장해 주세요.');}}
+  drawQuick();drawScript();
 }
 bind('jobs','click',async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.cancelJob)await api('/jobs/'+b.dataset.cancelJob+'/cancel',{method:'POST'});if(b.dataset.retryJob)await api('/jobs/'+b.dataset.retryJob+'/retry',{method:'POST'});if(b.dataset.cleanJob)await api('/exports/'+b.dataset.cleanJob,{method:'DELETE'});if(b.dataset.previewJob){if(b.dataset.signature!==project.render_signature)throw Error('이 미리보기는 이전 컷 버전이에요. 최신 렌더 미리보기를 만들어 주세요.');rendered=b.dataset.previewJob;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(b.dataset.file)+'?inline=true',0,true);$('preview-label').textContent='렌더 미리보기 · 최종 출력과 같은 컷·화면·색 변환';applyFrame();}await poll();});
 
 async function uploadFiles(files){
   if(!globalThis.crypto?.subtle)throw Error('안전한 HTTPS 연결이 필요합니다. 지원되는 최신 브라우저로 접속해 주세요.');
   if(uploadAbort)throw Error('현재 업로드가 끝난 뒤 추가해 주세요.');
-  if(!project){const p=await api('/projects',{method:'POST',body:JSON.stringify({name:'오늘의 신상 리뷰'})});await loadProjects(p.id);}
-  uploadPaused=false;uploadAbort=new AbortController();$('upload-progress').classList.remove('hidden');
+  if(!project){const draft={script:$('edit-script').value,directions:$('edit-directions').value};const p=await api('/projects',{method:'POST',body:JSON.stringify({name:'오늘의 신상 리뷰'})});await loadProjects(p.id);$('edit-script').value=draft.script;$('edit-directions').value=draft.directions;}
+  uploadPaused=false;uploadAbort=new AbortController();drawScript();$('upload-progress').classList.remove('hidden');
   try{for(const file of files){
     if(file.size>config.max_file_bytes)throw Error(`${file.name}: 파일당 최대 10GB(10,000,000,000바이트)입니다. 원본을 나눠 주세요.`);
     if(!file.size)throw Error('빈 파일은 올릴 수 없어요.');
@@ -190,11 +190,12 @@ async function uploadFiles(files){
     await api('/uploads/'+session.id+'/complete',{method:'POST'});localStorage.removeItem(key);toast(file.name+' 업로드 완료 · 영상 정보를 검사하고 있어요.');
   }}finally{uploadAbort=null;project=await api('/projects/'+project.id);draw();$('upload-progress').classList.add('hidden');await poll();}
 }
+bind('dubbing-upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});
 bind('upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});for(const event of ['dragenter','dragover'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.add('drag');});for(const event of ['dragleave','drop'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.remove('drag');if(event==='drop')uploadFiles([...e.dataTransfer.files]).catch(error=>toast(error.message));});
 bind('login-form','submit',async e=>{e.preventDefault();try{await api('/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('login-dialog').close();await init();}catch(error){$('login-error').textContent=error.message;}});$('login-dialog').addEventListener('cancel',e=>e.preventDefault());action('logout',async()=>{await api('/logout',{method:'POST'});$('player').pause();location.reload();});
 function modelInfo(){
   $('model-status').textContent=config.model_ready?`한국어 Whisper ${config.model_name} 준비됨 · 제품명은 등록하고 원음을 검수해 주세요.`:(config.desktop?'자막 모델을 준비하고 있어요. 상단에서 진행 상황을 확인해 주세요.':'자막 모델 설치 전이에요. 위의 무음 자동 편집은 바로 사용할 수 있어요.');
-  $('analyze').disabled=!config.model_ready;
+  $('analyze').disabled=!config.model_ready;drawScript();
 }
 async function refreshDesktop(){
   if(!config?.desktop || $('login-dialog').open)return;
@@ -209,3 +210,35 @@ async function refreshDesktop(){
 action('desktop-setup-retry',async()=>{await api('/desktop/retry',{method:'POST'});await refreshDesktop();});
 async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
 window.addEventListener('resize',waveform);window.addEventListener('DOMContentLoaded',init);
+
+const exampleScript=`아니 제가 CU 다섯 곳이나 돌아서 겨우 3개 구했거든요?
+과연 찾아다닐 만큼 맛있을까?
+빠르게 먹어볼게요!
+[첫 번째 제품명·실제 맛 평가]이고,
+[두 번째 제품명·실제 맛 평가]인데,
+[세 번째 제품명·실제 맛 평가].
+[찾아다닐 만큼 맛있는지 실제 결론과 이유].
+나머지는 매일 재고 검색하고 발품까지 팔았는데 아직 못 찾았어요.
+여러분은 다른 빵 먹어보셨어요?`;
+function drawScript(){
+ if(!config)return;
+ if(scriptFormProject!==project?.id){$('edit-script').value=project?.state.script_brief?.script||exampleScript;$('edit-directions').value=project?.state.script_brief?.directions||'9:16, 빠른 템포, 첫 문장 클로즈업, 나머지는 전체 화면. 원음 유지.';scriptFormProject=project?.id;}
+ const assets=project?.assets||[],ready=assets.some(a=>a.status==='ready'&&a.metadata.has_video!==false),pending=Boolean(uploadAbort)||assets.some(a=>['uploading','checking'].includes(a.status));
+ const busy=scriptStarting||[latestScript,latestAuto].some(j=>j&&['running','queued'].includes(j.status));
+ const speech=assets.filter(a=>a.status==='ready'&&a.metadata.has_audio),canRecognize=config.model_ready||speech.length>0&&speech.every(a=>a.analysis.transcribed);
+ $('script-start').disabled=!ready||pending||Boolean(busy)||!canRecognize;$('script-start').textContent=busy?'자동 편집 중…':!canRecognize&&ready?'음성 모델 준비 후 편집':'대본대로 자동 편집 시작';
+ const r=latestScript?.result,current=r?.applied&&r.render_signature===project?.render_signature;
+ $('script-play').classList.toggle('hidden',!current);$('script-export').classList.toggle('hidden',!current);$('script-export').disabled=!r?.complete;$('script-undo').classList.toggle('hidden',!r?.applied||project?.revision!==r.revision);
+ $('script-progress').classList.toggle('hidden',!busy);$('script-progress').firstElementChild.style.width=Math.round((latestScript?.progress||0)*100)+'%';
+ if(busy)$('script-status').textContent=latestScript?.message||'대본 자동 편집을 시작합니다.';
+ else if(latestScript&&['failed','cancelled'].includes(latestScript.status))$('script-status').textContent=latestScript.message;
+ else if(r?.lines)$('script-status').textContent=`${r.complete?'대본 편집 완료':'부분 미리보기 · 확인 필요'} · ${r.matched}/${r.total}줄 연결`+(r.after_seconds?` · ${clock(r.after_seconds)}`:'')+(r.notice?'\n'+r.notice:'')+(!r.complete?'\n빈칸·못 찾은 대사를 대본에서 수정하고 다시 실행해 주세요.':'');
+ else $('script-status').textContent=ready?(config.model_ready?'대본과 연출을 입력하고 시작하세요. 더빙 대사를 우선 연결하고, 나머지는 촬영 원음에서 찾습니다.':'대본과 연출을 먼저 입력하세요. 실제 음성 인식을 위해 상단 모델 준비가 완료되면 실행해 주세요.'):'왼쪽에서 촬영 원본을 올려주세요. 프로젝트는 자동으로 만들어져요.';
+ $('script-report').innerHTML=r?.lines?`<details ${r.complete?'':'open'}><summary>대본·실제 대사 연결 결과</summary>${r.lines.map(line=>`<div class="script-row ${line.status}"><b>${line.line}. ${esc({matched:'연결됨',missing:'대사 못 찾음',placeholder:'내용 미정'}[line.status])}</b><p>${esc(line.script)}</p>${line.source_text?`<p>실제 대사: ${esc(line.source_text)}</p><small>${clock(line.start)}–${clock(line.end)} · 일치 ${Math.round(line.score*100)}%${line.visual_name?' · 더빙 화면: '+esc(line.visual_name):' · 촬영 원음'}</small>`:''}<p>${esc(line.reason||line.visual_reason||'')}</p></div>`).join('')}</details><p class="muted">적용한 연출: ${esc(r.directing.supported.join(' · '))}</p>${r.directing.unapplied.map(t=>`<p class="review-note">${esc(t)}</p>`).join('')}`:'';
+ const downloadable=latestExport?.status==='completed'&&latestExport.result.render_signature===project?.render_signature;
+ $('script-downloads').innerHTML=downloadable?(latestExport.result.files||[]).filter(f=>['video','archive'].includes(f.type)).map(f=>`<a class="button primary" href="/api/exports/${latestExport.id}/${encodeURIComponent(f.name)}">${f.type==='video'?'편집본 MP4 다운로드':'편집본 ZIP 다운로드'} · ${bytes(f.size)}</a>`).join(''):'';
+}
+action('script-start',async()=>{requireProject();await saveQueue;const brief={script:$('edit-script').value,directions:$('edit-directions').value};scriptStarting=true;drawScript();try{await mutate(s=>s.script_brief=brief);await api('/projects/'+project.id+'/script-edit',{method:'POST',body:JSON.stringify({revision:project.revision,brief,voice_mode:'auto'})});await poll();}finally{scriptStarting=false;drawScript();}});
+action('script-play',()=>{const r=latestScript?.result,video=r?.files?.find(f=>f.type==='video');if(video&&r.render_signature===project.render_signature){rendered=latestScript.id;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(video.name)+'?inline=true',0,true);$('preview-label').textContent='대본 순서 자동 편집본 · 미리보기 화질';}else seekEdited(0,true);});
+action('script-export',()=>startRender(false,true));
+action('script-undo',async()=>{await saveQueue;const old=clone(project.state);project=await api('/projects/'+project.id+'/auto-cut/'+latestScript.id+'/undo',{method:'POST',body:JSON.stringify({revision:project.revision})});remember(old);rendered=null;currentSource=null;draw();toast('대본 자동 편집 전 타임라인으로 되돌렸어요.');});
