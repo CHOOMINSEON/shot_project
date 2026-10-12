@@ -5,6 +5,8 @@
 - Linux 자동 검증 **53개 통과**(32.68초). 실제 8초 영상의 약 2초 무음을 제거해 약 6.3초 편집본을 생성하고 MP4 길이를 확인했습니다. 비대사 소리를 유지하며 음성 모델을 호출하지 않습니다.
 - 보존 구간 유지, 수정 자막 보존/최종 출력의 검수 조건, 다른 탭 변경 보호, 재시작 후 중복 적용 방지, 되돌리기, 오디오 없음/영상 전체 무음일 때 원본 유지 검증을 통과했습니다.
 - 실제 Chromium에서 프로젝트 자동 생성 → 업로드 → 자막 모델 없는 자동 무음 컷 → 실제 편집본 재생 → 고화질 MP4 다운로드 → 자동 편집 되돌리기를 통과했습니다. 기존 수동 편집·한국어 자막 검수·MP4/SRT/ZIP 흐름도 통과했습니다. 모바일 390px 가로 넘침 없음, JavaScript 오류 0개.
+- [Windows Actions 검증](https://github.com/CHOOMINSEON/shot_project/actions/runs/38257021710) **53개 통과**(30.63초). 실제 단일 EXE에서 모델 없는 최초 작업실 진입 → 배경 medium 준비 → 업로드 → 무음 자동 컷/미리보기 → 짧아진 고화질 MP4 출력/다운로드를 통과했습니다.
+- [수정본 Release](https://github.com/CHOOMINSEON/shot_project/releases/tag/desktop-windows-bf08ddea) EXE 281285698바이트. 공개 다운로드 HTTP 206/Windows MZ 헤더와 자산 digest/SHA256SUMS 일치 확인. SHA-256 `1bf3df661e79f1c54e4f062b1c4b2cc89e4d4b91ccbdd66f7dbdc1ceb9374c50`.
 - 실제 10GB 고밀도 원본/2시간 연속 전체 부하 및 사용자 Windows PC에서의 실사용은 미검증입니다.
 
 ## Windows 화면이 열리지 않는다는 사용자 피드백 수정
