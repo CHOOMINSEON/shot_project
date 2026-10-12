@@ -107,3 +107,16 @@ def test_desktop_ticket_expiry_and_hostname(client):
     assert local.get(install_desktop_entry(app, ttl=0)).status_code == 403
     wrong_host = TestClient(app, base_url='http://other.example', client=('127.0.0.1', 40000))
     assert wrong_host.get(install_desktop_entry(app)).status_code == 403
+
+
+def test_manual_start_ticket_survives_automatic_browser_entry(client):
+    local = TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 40000))
+    automatic = install_desktop_entry(app)
+    manual = install_desktop_entry(app, ttl=600)
+    assert local.get(automatic, follow_redirects=False).status_code == 303
+    assert local.get(automatic).status_code == 403
+    # A user can choose another browser when the default browser stays hidden.
+    local.cookies.clear()
+    assert local.get(manual, follow_redirects=False).status_code == 303
+    assert local.get('/api/projects').status_code == 200
+    assert local.get(manual).status_code == 403

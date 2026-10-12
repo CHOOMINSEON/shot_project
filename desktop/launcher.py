@@ -120,13 +120,16 @@ def run(smoke_test=False):
                 entry = install_desktop_entry(app)
                 smoke(base, entry)
             else:
+                manual_entry = install_desktop_entry(app, ttl=600)
                 try:
                     opened = webbrowser.open(base + entry)
                 except OSError:
                     opened = False
                 if not opened:
-                    print('브라우저를 자동으로 열지 못했습니다. 브라우저 주소창에 다음 주소를 붙여 넣어 주세요:', flush=True)
-                    print(base + entry, flush=True)
+                    print('브라우저 자동 실행 요청을 보내지 못했습니다.', flush=True)
+                print('브라우저 창이 안 보이면 아래 접속 주소를 Chrome 또는 Edge 주소창에 붙여 넣으세요:', flush=True)
+                print('접속 주소: ' + base + manual_entry, flush=True)
+                print('이 주소는 이 PC에서 10분 안에 한 번 사용할 수 있습니다.', flush=True)
                 preparation.start()
                 print('브라우저에서 작업하세요. 이 창을 닫거나 Ctrl+C를 누르면 앱이 종료됩니다.', flush=True)
                 print('다시 실행하면 프로젝트와 원본을 이어서 사용할 수 있습니다.', flush=True)
