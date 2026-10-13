@@ -8,7 +8,7 @@ import numpy as np
 from .settings import DATA
 from . import scene_models
 
-VERSION = 'scene-v1-clip32-koreanocr11'
+VERSION = 'scene-v1-clip32-koreanocr12'
 # These English prompts are the actual inputs to the local visual/text encoder.
 PROMPTS = {
  'packaging': 'a photograph of packaged food with a printed brand label',
@@ -134,8 +134,8 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                         tags[ordered[0]]=round(raw[ordered[0]],4)
                 for key in ['packaging','product_full','closeup','crosssection','cream','reaction','empty_space','size_compare']:
                     cutoff=.285 if key in ['cream','reaction','empty_space','size_compare'] else .275 if key=='crosssection' else .26
-                    if key=='cream' and (raw[key]<.3 or raw[key]-raw['plain_bread']<.02):continue
-                    if raw[key]>=cutoff and raw[key]-negative>=.04:tags[key]=round(raw[key],4)
+                    if key=='cream' and (raw[key]<.285 or raw[key]-raw['plain_bread']<.02):continue
+                    if raw[key]>=cutoff and raw[key]-negative>=(.015 if key=='cream' else .04):tags[key]=round(raw[key],4)
                 ocr=model.read(image)[:20]
                 package_vector=model.texts([PROMPTS['packaging'],PROMPTS['no_food_screen']])
                 for item in ocr:

@@ -171,3 +171,15 @@ def test_short_insert_is_indexed_at_real_scene_change(tmp_path):
 @pytest.mark.parametrize('meaning,spoken',[('disappointment','기대했는데 맛있어요'),('satisfaction','맛있지 않아요'),('repurchase','다시 사 먹고 싶지 않아요')])
 def test_personal_evaluation_checks_actual_negation(meaning,spoken):
     assert not s.evaluation(meaning,spoken)
+
+
+
+def test_ocr_product_evidence_survives_low_visual_similarity():
+    class TextModel:
+        def texts(self,prompts):return np.array([[1.,0.]]*len(prompts))
+    search=s.Search.__new__(s.Search);search.products=[s.Product(name='허니롤')]
+    search.records=[record(tags={'packaging':.25})];search.vectors=np.array([[.18,.98]]);search.model=TextModel()
+    search.evidence={('v',search.records[0]['id']):[{'name':'허니롤','status':'candidate','reasons':['실제 제품 OCR 문구'],'uncertainties':['포장 영역 확인 필요']}]}
+    result=search.query('허니롤을 보여주세요')
+    assert result['supporting'][0]['match_type']=='확인 필요'
+    assert '실제 제품 OCR 문구' in result['supporting'][0]['selection_reason']

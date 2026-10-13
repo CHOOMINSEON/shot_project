@@ -184,7 +184,7 @@ class Search:
         boosts=np.asarray([max([.18 if p['status']=='confirmed' else .1 if p['status']=='continuity_candidate' else .05+p.get('reference_similarity',0)*.05 for p in self.evidence[(r['asset_id'],r['id'])] if p['name'] in requested_names] or [0]) for r in self.records],dtype=np.float32)
         if 'cream' in request['visual_features']:
             # Rank observed cream evidence over generic bread cross sections.
-            boosts+=np.asarray([max(-.1,min(.1,(r.get('similarities',{}).get('cream',0)-r.get('similarities',{}).get('plain_bread',0))*.7)) for r in self.records])
+            boosts+=np.asarray([max(-.1,min(.1,(r.get('similarities',{}).get('cream',0)-r.get('similarities',{}).get('plain_bread',0))*2)) for r in self.records])
         order=np.argsort(-(scores+boosts))[:100]
         exact=[];support=[];seen=[]
         requested_names={p['name'] for p in request['products']}
@@ -194,7 +194,8 @@ class Search:
             positions[(entry['asset_id'],entry['id'])]=len(group);group.append(entry)
         for index in order:
             check();row=self.records[index];score=float(scores[index])
-            if score<.23:continue
+            observed_products=self.evidence[(row['asset_id'],row['id'])]
+            if score<.23 and not any(p['name'] in requested_names for p in observed_products):continue
             if any(a==row['asset_id'] and abs(t-row['start'])<1 for a,t in seen):continue
             seen.append((row['asset_id'],row['start']))
             actual=row['tags'];product=self.evidence[(row['asset_id'],row['id'])]
