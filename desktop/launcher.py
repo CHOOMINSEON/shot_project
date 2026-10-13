@@ -30,6 +30,14 @@ def smoke(base, entry):
     from studio.settings import DATA
     from studio.worker import load_model
 
+    from studio import scene_models
+    from PIL import Image,ImageDraw,ImageFont
+    vision=scene_models.load()
+    label=Image.new('RGB',(600,200),'white')
+    ImageDraw.Draw(label).text((20,40),'Nutella ORIGINAL',font=ImageFont.truetype('arial.ttf',48),fill='black')
+    assert 'Nutella' in ''.join(r['text'] for r in vision.read(label))
+    assert vision.image(label).shape==(512,)
+    print('Packaged local CLIP and OCR model inference passed (controlled English label).')
     list(load_model().transcribe(np.zeros(32000, dtype=np.float32), language='ko', vad_filter=True)[0])
     with httpx.Client(base_url=base, timeout=30, trust_env=False) as client:
         assert client.get('/api/projects').status_code == 401
@@ -67,6 +75,10 @@ def smoke(base, entry):
         cut_job = wait_job(cut.json()['job_id'])
         assert 1.3 < cut_job['result']['removed_seconds'] < 2
         project = client.get('/api/projects/' + project['id']).json()
+        scenes=client.get(f'/api/assets/{upload["id"]}/scenes').json()
+        assert scenes['analysis']['complete'] and scenes['scenes']
+        first=scenes['scenes'][0]
+        assert client.get(f'/api/assets/{upload["id"]}/scenes/{first["id"]}.jpg').status_code==200
         assert 6 < project['duration'] < 6.8 and len(project['state']['clips']) == 2
         response = client.post('/api/projects/' + project['id'] + '/render', json={
             'revision': project['revision'], 'mode': 'full', 'preview': False, 'filename': 'desktop-smoke'})

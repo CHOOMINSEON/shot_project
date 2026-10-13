@@ -35,3 +35,13 @@ def sample(tmp_path_factory):
                     '-af', "volume=enable='between(t,2,4)':volume=0", '-c:v', 'libx264', '-threads', '2',
                     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', str(path)], check=True)
     return path
+
+
+@pytest.fixture(scope='session',autouse=True)
+def vision_runtime():
+    """Reuse verified models if installed; CI obtains pinned public models once."""
+    from studio import scene_models
+    local=Path(__file__).resolve().parents[1]/'.data/models/scene-search-v1'
+    if all((local/name).is_file() for name,*_ in scene_models.FILES):
+        scene_models.DIRECTORY=local
+    scene_models.ensure()

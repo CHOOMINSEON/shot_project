@@ -33,6 +33,9 @@ def validate_state(state, assets):
             visual_start = clip.get('visual_start', 0)
             if not visual or visual['status'] != 'ready' or not visual['metadata'].get('has_video', True) or not finite(visual_start) or not 0 <= visual_start < visual['metadata']['duration']:
                 raise ValueError('더빙에 연결할 실제 영상과 시작 시간을 확인해 주세요.')
+            visual_end=clip.get('visual_end',visual['metadata']['duration'])
+            if not finite(visual_end) or not visual_start<visual_end<=visual['metadata']['duration']+.001:
+                raise ValueError('선택한 실제 영상 장면의 종료 시간을 확인하세요.')
         if not asset['metadata'].get('has_video', True) and not visual:
             raise ValueError('더빙 구간에는 촬영 영상을 연결해 주세요.')
         start, end = clip.get('start'), clip.get('end')
@@ -227,6 +230,44 @@ def generate_captions(state, assets, target=14):
     archive = list({(c['id'], c['text']): c for c in archive}.values())
     return {'signature': signature(state), 'items': result, 'archived_edits': archive}
 
+
+
+def sync_captions(before,state,assets):
+    """Remap edited/manual captions through source time when cuts or order change."""
+    result=generate_captions(state,assets)
+    source_edits=[]
+    offset=0
+    olditems=state.get('captions',{}).get('items',[])
+    # before contains timing before the mutation; state retains user's latest text edits.
+    for clip in before.get('clips',[]):
+        length=clip['end']-clip['start']
+        for item in olditems:
+            if not item.get('edited') and item.get('source_key'):continue
+            a=max(offset,item['start']);b=min(offset+length,item['end'])
+            if b>a:source_edits.append((clip['asset_id'],clip['start']+a-offset,clip['start']+b-offset,item))
+        offset+=length
+    mapped=[];used=set();offset=0
+    for clip in state.get('clips',[]):
+        for asset_id,a,b,item in source_edits:
+            if asset_id!=clip['asset_id']:continue
+            left=max(a,clip['start']);right=min(b,clip['end'])
+            if right<=left:continue
+            new={**item,'id':item['id']+':'+clip['id'],'start':round(offset+left-clip['start'],3),
+                 'end':round(offset+right-clip['start'],3),'source_asset_id':asset_id,'source_start':left,'source_end':right,
+                 'edited':True,'review_token':'','reviewed':False,'review':True,
+                 'review_reasons':list(dict.fromkeys(item.get('review_reasons',[])+['컷·순서 변경 후 자막 위치·원음 재검수 필요']))}
+            if new['end']>new['start']:mapped.append(new);used.add(item['id'])
+        offset+=clip['end']-clip['start']
+    # A source-mapped user edit takes precedence over regenerated ASR in its interval.
+    remaining=[c for c in result['items'] if not any(m['start']<c['end'] and m['end']>c['start'] for m in mapped)]
+    items=sorted(remaining+mapped,key=lambda c:(c['start'],c['end']))
+    for first,second in zip(items,items[1:]):
+        if first['end']>second['start']:first['end']=second['start']
+    result['items']=[c for c in items if c['end']>c['start']]
+    result['archived_edits']=[c for c in result['archived_edits'] if c['id'] not in used]
+    result['archived_edits'] += [{**c,'archive_reason':'해당 원본 구간이 삭제되어 표시할 위치 없음'} for c in olditems
+                                if c.get('edited') and c['id'] not in used and c['id'] not in {a['id'] for a in result['archived_edits']}]
+    return result
 
 def validate_captions(items, length):
     previous_end = 0

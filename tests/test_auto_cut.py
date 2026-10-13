@@ -58,10 +58,12 @@ def test_silence_cut_respects_protection_and_preserves_existing_caption_edits(ow
     current = owner.get('/api/projects/' + p['id']).json()
     assert any(c['start'] <= 2.5 and c['end'] >= 3 for c in current['state']['clips'])
     assert current['state']['captions']['items'][0]['text'] == '확인한 제품명 · 안 달아요'
-    assert current['state']['captions']['signature'] != current['signature']
+    assert current['state']['captions']['signature'] == current['signature']
+    assert current['state']['captions']['items'][0]['start']<5
+    assert not current['state']['captions']['items'][0].get('reviewed')
     # Preview is usable; final captions still require timing correction/review.
     assert job['result']['files']
-    assert owner.post('/api/projects/' + p['id'] + '/render', json={'revision': current['revision']}).status_code == 409
+    assert owner.post('/api/projects/' + p['id'] + '/render', json={'revision': current['revision']}).status_code == 422
 
 
 def test_silence_job_never_overwrites_concurrent_edits(owner, sample):

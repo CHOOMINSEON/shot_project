@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, timeline, proofreading, script_edit
+from . import db, timeline, proofreading, script_edit, scene_index, scene_search
 from .media import Cancelled, probe, render_piece, run_ffmpeg
 from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
@@ -288,11 +288,14 @@ def auto_cut(ident, payload):
             if b > a:
                 candidates.append({'start': a, 'end': b})
         check_cancel(ident)
-        update(ident, .32, '2/3 · 무음 자동 삭제 · 보존 구간 유지')
+        summary=scene_index.build(asset,lambda:check_cancel(ident),lambda v,m:update(ident,.3+v*.1,m))
+        visual_protections=scene_index.protected(asset['id'])
+        candidates=[{'start':a,'end':b} for c in candidates for a,b in timeline.subtract([c['start'],c['end']],visual_protections)]
+        update(ident, .4, '2/3 · 시식·단면·제품 화면 보존 후 무음 삭제')
         with db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
-            analysis = {**asset['analysis'], 'silence': {'gaps': gaps, 'candidates': candidates,
+            analysis = {**asset['analysis'],'scenes':summary, 'silence': {'gaps': gaps, 'candidates': candidates,
                         'threshold_db': payload['threshold_db'], 'minimum': payload['minimum']}}
             conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(analysis), asset['id']))
             if row['revision'] != payload['revision']:
@@ -301,7 +304,9 @@ def auto_cut(ident, payload):
                 raise Cancelled()
             before_state = json.loads(row['state'])
             state = timeline.apply_cuts(json.loads(row['state']), asset['id'], candidates)
-            timeline.validate_state(state, {a['id']: db.get_asset(a['id']) for a in conn.execute('SELECT id FROM assets WHERE project_id=?', (job['project_id'],))})
+            assets={a['id']: db.get_asset(a['id']) for a in conn.execute('SELECT id FROM assets WHERE project_id=?', (job['project_id'],))}
+            timeline.validate_state(state,assets)
+            if state.get('captions',{}).get('items'):state['captions']=timeline.sync_captions(before_state,state,assets)
             before_length, after_length = timeline.duration(before_state['clips']), timeline.duration(state['clips'])
             if after_length < 1 / state.get('fps', 30):
                 raise ValueError('영상 전체가 무음으로 감지되어 원본을 유지했어요. 무음 기준을 더 낮추거나 보존 구간을 지정해 주세요.')
@@ -310,7 +315,7 @@ def auto_cut(ident, payload):
             revision = row['revision'] + 1
             result = {'applied': True, 'asset_id': asset['id'], 'before_seconds': before_length,
                       'after_seconds': after_length, 'removed_seconds': max(0, before_length - after_length),
-                      'candidates': len(candidates), 'revision': revision,
+                      'candidates': len(candidates),'protected_scenes':len(visual_protections), 'revision': revision,
                       'signature': timeline.signature(state), 'render_signature': timeline.render_signature(state),
                       'preview': True, 'files': []}
             # Save commit + snapshot atomically so a restart cannot apply the cuts twice.
@@ -340,24 +345,37 @@ def edit_script(ident, payload):
         job=conn.execute('SELECT project_id,result FROM jobs WHERE id=?',(ident,)).fetchone()
     result=json.loads(job['result'])
     if not result.get('applied'):
+        with db.connection() as conn:
+            raw=conn.execute('SELECT state FROM projects WHERE id=?',(job['project_id'],)).fetchone()
+        product_info=json.loads(raw['state']).get('scene_products',[])
+        vocabulary=', '.join(' '.join([p.get('name',''),p.get('brand',''),p.get('variant','')]) for p in product_info)[:1000]
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset=db.get_asset(asset_id)
             if not asset['analysis'].get('transcribed'):
                 update(ident,0,f'{index+1}/{len(payload["speech_ids"])} · 실제 대사 인식: {asset["name"]}')
                 analyze(ident,{'asset_id':asset_id,'transcribe':True,'model':payload['model'],
-                               'script_asset_checkpoint':True,'vocabulary':'','names':[]})
+                               'script_asset_checkpoint':True,'vocabulary':vocabulary,'names':[p['name'] for p in product_info]})
         check_cancel(ident)
         assets={a:db.get_asset(a) for a in payload['asset_ids']}
-        update(ident,.35,'대본 순서대로 실제 구간 연결 · 연출 적용')
+        videos=[a for a in assets.values() if a['metadata'].get('has_video',True)]
+        for n,asset in enumerate(videos):
+            summary=scene_index.build(asset,lambda:check_cancel(ident),lambda v,m:update(ident,.1+.24*(n+v)/len(videos),m))
+            with db.connection() as conn:
+                analysis={**db.get_asset(asset['id'])['analysis'],'scenes':summary}
+                conn.execute('UPDATE assets SET analysis=? WHERE id=?',(json.dumps(analysis,ensure_ascii=False),asset['id']))
+            asset['analysis']=analysis
+        update(ident,.35,'원문 대사·제품 OCR·의미 기반 장면 검색')
         with db.connection() as conn:
             snapshot=conn.execute('SELECT state,revision FROM projects WHERE id=?',(job['project_id'],)).fetchone()
         if snapshot['revision']!=payload['revision']:
             raise ValueError('대사 분석 중 편집이 변경되어 원본 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
         before=json.loads(snapshot['state'])
         # Matching can scan hours of speech; do CPU work outside SQLite's write lock.
+        scenes=scene_search.Search(assets,before.get('scene_products',[]),lambda:check_cancel(ident),payload['brief']['script'])
         state=script_edit.assemble(script_edit.Brief.model_validate(payload['brief']),before,assets,
-                                   payload['voice_mode'],check=lambda:check_cancel(ident))
+                                   payload['voice_mode'],check=lambda:check_cancel(ident),scenes=scenes)
+        state['script_edit']['speech_skipped']=payload.get('speech_skipped',0)
         check_cancel(ident)
         with db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -370,7 +388,7 @@ def edit_script(ident, payload):
                     'matched':sum(r['status']=='matched' for r in state['script_edit']['lines']),
                     'total':len(state['script_edit']['lines'])}
             if not state['clips']:
-                return {**result,'notice':'일치하는 실제 대사가 없어 기존 편집을 유지했어요. 대본과 원음을 확인해 주세요.'}
+                return {**result,'notice':'자동 연결할 대사가 없어 기존 편집을 유지했어요. 실제 영상 장면 후보를 확인하고 선택하세요.'}
             if len(json.dumps(state,ensure_ascii=False).encode())>4*1024*1024:
                 raise ValueError('편집 정보가 너무 큽니다. 대본·원본을 나눠 주세요.')
             revision=row['revision']+1

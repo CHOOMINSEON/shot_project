@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $ffmpeg = (Get-Content desktop/vendor/location.txt -Raw).Trim()
-          python -m PyInstaller --noconfirm --clean --onefile --console --name IyoringCutStudio --paths . --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime --collect-all tokenizers --collect-all av --collect-all huggingface_hub --collect-submodules uvicorn --add-data 'web;web' --add-data "$ffmpeg;ffmpeg" desktop/launcher.py
+          python -m PyInstaller --noconfirm --clean --onefile --console --name IyoringCutStudio --paths . --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime --collect-all tokenizers --collect-all av --collect-all huggingface_hub --collect-all rapidocr_onnxruntime --collect-all cv2 --collect-all PIL --collect-submodules uvicorn --add-data 'web;web' --add-data "$ffmpeg;ffmpeg" desktop/launcher.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify first launch of the packaged executable
         shell: pwsh
@@ -85,9 +85,9 @@ jobs:
           "$hash  IyoringCutStudio.exe" | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
           Copy-Item desktop/README.md dist/사용방법.md
           @'
-          Windows 10/11 x64에서 IyoringCutStudio.exe를 내려받아 더블클릭하세요. Docker/Python/FFmpeg 별도 설치 없이 브라우저가 열립니다. 원본 업로드 → 예상 대본·연출 입력 → 대본대로 자동 편집 시작 → 편집본 확인 → 고화질 MP4 저장 순서로 사용하세요. 직접 녹음한 더빙과 촬영 원음을 한 편 안에서 사용할 수 있습니다. 무음 컷 적용과 미리보기 생성은 자동이며 자막 모델 없이 가능합니다. 한국어 자막용 medium 모델 약 1.5GB는 별도로 준비됩니다.
+          Windows 10/11 x64에서 IyoringCutStudio.exe를 내려받아 더블클릭하세요. Docker/Python/FFmpeg 별도 설치 없이 브라우저가 열립니다. 원본 업로드 → 예상 대본·연출 입력 → 대본대로 자동 편집 시작 → 편집본 확인 → 고화질 MP4 저장 순서로 사용하세요. 직접 녹음한 더빙과 촬영 원음을 한 편 안에서 사용할 수 있습니다. 대사 외에도 한국어·영문 포장 OCR과 로컬 CLIP 장면 분석으로 무음 단면·시식 후보를 찾고 원본 확인 후 선택할 수 있습니다. 최종 편집본 다운로드 버튼에서 MP4를 받으세요. 무음 컷 적용과 미리보기 생성은 자동이며 음성 모델 없이 가능합니다. 장면·OCR 모델 약 172MB는 첫 검색 시 별도로 준비됩니다. 한국어 자막용 medium 모델 약 1.5GB는 별도로 준비됩니다.
 
-          실제 Windows 테스트와 실행 파일 자체의 모델·인증·업로드·실제 무음 자동 컷·사전 정렬 검증 데이터의 대본 순서 편집·원음/더빙 혼합·MP4 출력 검증이 통과한 빌드입니다. 사용자 PC용 앱이며 인터넷 공개 사이트 배포와 다릅니다. 원본 최대 10GB·2시간, 실제 전체 부하 검증은 미수행입니다.
+          실제 Windows 테스트와 실행 파일 자체의 모델·인증·업로드·실제 무음 자동 컷·사전 정렬 검증 데이터의 대본 순서 편집·원음/더빙 혼합·로컬 CLIP/OCR 추론·영상 프레임 인덱스·MP4 출력 검증이 통과한 빌드입니다. 사용자 PC용 앱이며 인터넷 공개 사이트 배포와 다릅니다. 원본 최대 10GB·2시간, 실제 전체 부하 검증은 미수행입니다.
           '@ | Out-File -FilePath dist/release-notes.md -Encoding utf8
           gh release create $tag dist/IyoringCutStudio.exe dist/SHA256SUMS.txt dist/사용방법.md --repo '${{ github.repository }}' --target '${{ github.sha }}' --title '이요링 컷 스튜디오 · Windows 바로 실행' --notes-file dist/release-notes.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

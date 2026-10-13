@@ -167,8 +167,10 @@ def test_real_render_subtitles_zip_range_and_version(owner, sample, fps):
         assert json.loads(zipped.read('edit-list.json'))['revision'] == edited['revision']
     state['clips'].reverse()
     newer = owner.put(endpoint, json={'name': p['name'], 'revision': edited['revision'], 'state': state}).json()
-    assert owner.get(endpoint + '/captions.srt').status_code == 409
-    assert owner.post(endpoint + '/render', json={'revision': newer['revision']}).status_code == 409
+    assert owner.get(endpoint + '/captions.srt').status_code == 422
+    assert newer['state']['captions']['signature']==newer['signature']
+    assert newer['state']['captions']['items'][0]['text']=='10점 만점에 8점'
+    assert owner.post(endpoint + '/render', json={'revision': newer['revision']}).status_code == 422
     # Previously exported files remain frozen to their actual revision.
     assert owner.get(f'/api/exports/{job["id"]}/{archive["name"]}').status_code == 200
 

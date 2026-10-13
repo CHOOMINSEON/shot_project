@@ -157,3 +157,28 @@ Hugging Face Docker Space용 패키지와 UID 1000 시작 구성을 준비하고
 - 브라우저 함수가 성공을 반환하지만 화면을 열지 않는 상황을 모사한 실제 Linux 시작 프로그램에서 주소 표시 → 수동 로그인 → 프로젝트 접근 → 재사용 거부를 확인했습니다. 테스트 출력에는 실제 개인 진입 주소를 기록하지 않았습니다.
 - Windows [Actions 실행 38247035823](https://github.com/CHOOMINSEON/shot_project/actions/runs/38247035823)에서 **48개 통과**(23.78초), 실제 EXE의 모델 없는 작업실 진입 → 배경 모델 준비 → 업로드/MP4 출력 검증을 통과했습니다.
 - [수정본 Release](https://github.com/CHOOMINSEON/shot_project/releases/tag/desktop-windows-2e0984db)의 공개 다운로드 HTTP 206/Windows MZ 헤더, GitHub digest/체크섬 일치를 확인했습니다. EXE 281,277,722바이트, SHA-256 `c1b83bb5a7f4d5a537b096d89dc829ec0feee0bf650bc2fbcb905c6ce51b7788`. 사용자 PC에서 새 수정본의 창 표시·직접 접속 성공은 아직 확인받지 않았습니다.
+
+
+## 대본 기반 시각 장면 검색 — 2026-10-13
+
+기존 `script_edit.Transcript.find`는 Whisper 전사에 대한 문자열 유사도 검색뿐이었으며 영상 프레임/OCR/장면 인덱스가 없었습니다. `scene_models.py`(검증된 로컬 ONNX CLIP/PaddleOCR), `scene_index.py`(PyAV 실제 PTS·전환·촘촘한 주변 관측), `scene_search.py`(한국어 의도 확장·제품 증거·분리된 후보)를 실제 `worker.edit_script`에 연결했습니다. 실제 검색 프롬프트는 `scene_index.PROMPTS`와 `scene_search.intent.visual_queries`입니다. 추론은 유료 API 없이 서버/사용자 PC에서 실행합니다.
+
+검증용 원본은 사용자 촬영 파일이 아닌 공개 실제 영상입니다. 사용자 원본에서의 정확도, 다양한 포장/맛 식별, 2시간 전체 분석 부하는 미검증입니다. 특히 CLIP 태그는 관측 후보이며 행동·제품·표정의 확정 판정이 아닙니다.
+
+| 요청 사례 | 실행한 검증 및 결과 | 한계 |
+| --- | --- | --- |
+| ① 동일한 대사 | 실제 한국어 녹음으로 Chromium에서 Whisper 인식 → 대본 매칭 → 원음/더빙 MP4 다운로드 통과 | 기존 비교용 화면+실제 녹음 자료, 푸드 리뷰 촬영 음성은 아님 |
+| ② 제품명 발화 없이 포장만 | Wikimedia 실제 크리스마스 Coca-Cola 병 회전 영상의 27–35초를 음성 없이 사용. OCR에 `Veihnachten`/일부 글자 누락이 관측되어 OCR만으로는 확정하지 않음. 등록 제품의 별칭 `Frohe Weihnachten`와 실제 관측 프레임에서 만든 **통제 참고 이미지**를 함께 대조하면 원본 0–0.5005초에서 제품 일치 후보 반환, 시각 유사도 0.9502 | 동일 프레임 참고 이미지를 사용한 통제 검증이며 일반 제조사 이미지·다른 맛 구별 정확도를 보장하지 않음 |
+| ③ 개봉 후 제품명이 없는 단면·시식 | Mixkit 실제 빵 자르기/도넛 시식과 Wikimedia 실제 크림 케이크 시식 영상의 무음 사본에서 시각 후보 반환. 실제 무음 빵 영상으로 검색 → 후보 재생 → 수동 선택 → 최종 다운로드 버튼 MP4 검증 통과 | 같은 제품 소개→개봉의 실제 연속 촬영 파일은 미제공. 연속성 및 컷 경계·다른 맛의 오인 방지는 독립 테스트로 검증 |
+| ④ 추상 평가 | `크림이 가득하다`는 단면/크림 후보로 확장하되 양을 확정하지 않고 보조 후보 반환. `기대했는데 별로다`/`다시 사 먹고 싶다`는 평가 발화가 없는 실제 시식 영상에서 정확한 일치 없음·보조 장면만 반환 | 맛·감정·재구매를 표정으로 추정하지 않음. 긍정/부정 발화 확인 규칙은 별도 회귀 테스트 |
+| ⑤ 없는 장면 | 실제 빵/시식/채소 영상에서 `삼각김밥을 전자레인지에 돌려요` 검색 시 정확한 일치 없음. 보조 후보는 정답 목록과 분리 | 지원 규칙에 없는 표현은 자동 의미 일치 확정 없이 검토 필요 |
+
+실제 영상 출처:
+
+- Mixkit: [Woman cutting slices of sliced bread](https://mixkit.co/free-stock-video/woman-cutting-slices-of-sliced-bread-43903/), 영상 ID 43903. 시식 ID 40831, 채소 준비 ID 40524. 로컬 검증용으로만 사용하고 원본 영상을 저장소/EXE에 포함하지 않습니다.
+- Wikimedia [Coca-Cola bottle rotation](https://commons.wikimedia.org/w/index.php?curid=158809271), CC BY 4.0. 공식 1080p 변환본을 사용. 원본 상세 메타데이터는 로컬 검증 폴더에 보존했습니다.
+- Wikimedia [Mellawnie ASMR chocolate/cream dessert footage](https://commons.wikimedia.org/w/index.php?curid=178415972), MellawnieASMR 멜라우니, CC BY 3.0. 원본 389–401초를 사용. 반복되는 제작자 워터마크를 제품 OCR 근거로 제외합니다.
+
+새 테스트는 제품명/맛·문맥 연속성, 컷을 넘는 오인 방지, 표정만으로 개인 평가 확정 금지, 평가 발화의 부정, 참고 이미지 프로젝트 소유권, 반복 모서리 워터마크 제외, 시식 무음 자동 삭제 방지, 0.2초 통제 장면 전환의 실제 타임스탬프, 수동 후보의 서버 저장 시간 사용, 수동 자막 순서/컷 동기화를 확인합니다. 더빙 화면은 선택 구간 밖으로 재생하지 않고 길이가 부족하면 마지막 관측 프레임을 유지합니다.
+
+`scripts/browser_scene_smoke.py`는 `STUDIO_DATA_DIR`, `STUDIO_TEST_URL`, `STUDIO_SCENE_TEST_VIDEO`(실제 빵 자르기 무음 영상), 선택적 `STUDIO_SCENE_TEST_SCRIPT`로 실행할 수 있습니다. 새 검증 프로젝트를 생성하며 최종 MP4의 실제 브라우저 다운로드와 JavaScript 오류 없음까지 확인합니다.

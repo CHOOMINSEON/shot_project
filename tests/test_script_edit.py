@@ -100,7 +100,7 @@ def test_dubbing_upload_script_alignment_and_real_audio_replacement(owner,sample
     assert wait_job(owner,owner.post(f'/api/uploads/{upload["id"]}/complete').json()['job_id'])['status']=='completed'
     p=owner.get('/api/projects/'+p['id']).json()
     assert len(p['state']['clips'])==1
-    audio_id=upload['id'];cached(audio_id,transcript()['analysis']['words'])
+    audio_id=upload['id'];cached(audio_id,transcript()['analysis']['words']);cached(video_id,transcript()['analysis']['words'])
     assert owner.get(f'/api/assets/{audio_id}/thumbnail').status_code==200
     response=owner.post(f'/api/projects/{p["id"]}/script-edit',json={'revision':p['revision'],'brief':{'script':'빠르게 먹어볼게요!'},'voice_mode':'dubbing'})
     assert response.status_code==200,response.text
@@ -135,12 +135,13 @@ def test_original_and_dubbing_can_be_combined_in_one_script():
     video=transcript();video['analysis']['words']=video['analysis']['words'][:1]
     audio=transcript('voice');audio['metadata']['has_video']=False;audio['analysis']['words']=audio['analysis']['words'][1:]
     value=script_edit.assemble(script_edit.Brief(script='과연 찾아다닐 만큼 맛있을까?\n빠르게 먹어볼게요!'),state(),{'v':video,'voice':audio})
-    assert value['script_edit']['complete'] and value['script_edit']['voice']=='mixed'
-    assert [c['asset_id'] for c in value['clips']]==['v','voice']
-    assert value['clips'][1]['visual_asset_id']=='v'
+    assert not value['script_edit']['complete']
+    assert [c['asset_id'] for c in value['clips']]==['v']
+    assert value['script_edit']['lines'][1]['status']=='needs_scene'
+    assert value['script_edit']['lines'][1]['pending_voice']['asset_id']=='voice'
 
 
-def test_dubbing_uses_corresponding_original_shot_and_honors_filename_keywords():
+def test_dubbing_uses_corresponding_actual_speech_and_not_filename_only():
     video=transcript();audio=transcript('voice');audio['metadata']['has_video']=False
     brief=script_edit.Brief(script='빠르게 먹어볼게요!')
     value=script_edit.assemble(brief,state(),{'v':video,'voice':audio})
@@ -149,7 +150,7 @@ def test_dubbing_uses_corresponding_original_shot_and_honors_filename_keywords()
     closeup=transcript('closeup');closeup['name']='단면.mp4';closeup['analysis']['words']=[]
     brief=script_edit.Brief(script='빠르게 먹어볼게요!',directions='단면 컷을 사용')
     value=script_edit.assemble(brief,state(),{'v':video,'voice':audio,'closeup':closeup})
-    assert value['clips'][0]['visual_asset_id']=='closeup'
+    assert value['clips'][0]['visual_asset_id']=='v' and value['clips'][0]['visual_start']>4
 
 
 def test_very_low_confidence_recognition_is_not_automatically_used():

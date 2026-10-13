@@ -45,6 +45,7 @@ def init():
           status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
           payload TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}', cancel INTEGER NOT NULL DEFAULT 0,
           created REAL NOT NULL, updated REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS product_references (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL);
         ''')
 

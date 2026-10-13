@@ -146,16 +146,24 @@ def directing(text):
             'all_close': all_close, 'supported': supported, 'unapplied': unsupported}
 
 
-def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
+def assemble(brief, state, assets, voice_mode='auto', check=lambda: None, scenes=None):
     videos = [a for a in assets.values() if a['status']=='ready' and a['metadata'].get('has_video', True)]
     dubbing = [a for a in assets.values() if a['status']=='ready' and not a['metadata'].get('has_video', True)]
     selected = dubbing if voice_mode=='dubbing' else videos if voice_mode=='original' else dubbing+videos
     transcripts = [Transcript(asset) for asset in selected if asset['metadata'].get('has_audio')]
     used, report, clips = defaultdict(list), [], []
+    video_transcripts=[Transcript(a) for a in videos if a['metadata'].get('has_audio')]
+    previous_intent=None
     direction = directing(brief.directions)
     for i, line in enumerate(s for s in brief.script.splitlines() if s.strip()):
         check()
-        item = {'line': i+1, 'script': line, 'status': 'missing', 'reason': '실제 대사에서 충분히 일치하는 구간을 찾지 못했어요.'}
+        item = {'line': i+1, 'script': line, 'status': 'missing', 'reason': '정확한 일치 없음 · 장면 후보도 확인해 주세요.'}
+        if scenes is not None and normalized(line):
+            retrieval=scenes.query(line,previous_intent,check)
+            item.update(retrieval)
+            # Do not replace script line numbers/status with retrieval status.
+            item['status']='missing';item['scene_status']=retrieval['status']
+            previous_intent=retrieval['intent']
         if re.search(r'\[[^\]]+\]', line):
             item.update(status='placeholder', reason='제품명·맛 평가·결론을 실제 내용으로 채워 주세요.')
         else:
@@ -165,7 +173,7 @@ def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
             if matches:
                 match = matches[0]
                 used[match['asset_id']].append([match['start'], match['end']])
-                item.update(match, status='matched', reason='인식 대사와 대본을 대조해 주세요.' if match['score'] < .98 or match['confidence'] < .85 else '')
+                item.update(match, status='matched',match_type='대사 일치',filename=assets[match['asset_id']]['name'], reason='인식 대사와 대본을 대조해 주세요.' if match['score'] < .98 or match['confidence'] < .85 else '')
                 source = assets[match['asset_id']]
                 use_dubbing = not source['metadata'].get('has_video',True)
                 item['voice'] = 'dubbing' if use_dubbing else 'original'
@@ -177,23 +185,28 @@ def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
                 cuts = timeline.cut_candidates(source['analysis'].get('speech', []), source['metadata']['duration'],
                                                direction['minimum'], direction['before'], direction['after']) if source['analysis'].get('speech') else []
                 protections = [(p['start'],p['end']) for p in state.get('protections', []) if p['asset_id']==source['id']]
+                if scenes is not None and not use_dubbing:
+                    from .scene_index import protected
+                    protections+=protected(source['id'])
                 effective = [part for c in cuts for part in timeline.subtract([c['start'],c['end']], protections)]
                 for index,(start,end) in enumerate(timeline.subtract([a,b],effective)):
                     if end-start >= 1/state.get('fps',30):
                         clip = {'id': f'script-{i+1}-{source["id"]}-{index}', 'asset_id': source['id'], 'start': start, 'end': end,
                                 'label': f'{i+1}. {line[:45]}', 'frame': frame, 'script_line': i+1}
                         if use_dubbing and videos:
-                            def shot_score(video):
-                                tags = re.split(r'[\s_.-]+', video['name'].rsplit('.',1)[0])
-                                return sum(len(tag) for tag in tags if len(tag)>=2 and normalized(tag) in normalized(line+' '+brief.directions))
-                            preferred = max(videos, key=shot_score)
-                            corresponding = [m for t in transcripts if t.asset['metadata'].get('has_video',True) and (m:=t.find(query,[],check))]
+                            corresponding=[m for t in video_transcripts if (m:=t.find(query,[],check))]
                             corresponding.sort(key=lambda m:(m['score'],m['confidence']),reverse=True)
-                            visual = preferred if shot_score(preferred) else assets[corresponding[0]['asset_id']] if corresponding else videos[i % len(videos)]
-                            visual_start = max(0,corresponding[0]['start']+start-match['start']) if corresponding and not shot_score(preferred) else 0
-                            visual_start = min(visual_start, max(0,visual['metadata']['duration']-1/state.get('fps',30)))
-                            clip.update(visual_asset_id=visual['id'], visual_start=visual_start)
-                            item.update(visual_asset_id=visual['id'], visual_name=visual['name'], visual_reason='파일명과 대본·연출 키워드 연결' if shot_score(preferred) else '촬영 원본의 같은 대사 장면 연결' if corresponding else '촬영 영상 업로드 순서로 연결 · 장면 확인 필요')
+                            if corresponding:
+                                visual_match=corresponding[0];visual=assets[visual_match['asset_id']]
+                                visual_start=max(0,visual_match['start']+start-match['start'])
+                                visual_start=min(visual_start,visual['metadata']['duration']-1/state.get('fps',30))
+                                visual_end=min(visual['metadata']['duration'],visual_match['end']+direction['after'])
+                                clip.update(visual_asset_id=visual['id'],visual_start=visual_start,visual_end=max(visual_start+1/state.get('fps',30),visual_end))
+                                item.update(visual_asset_id=visual['id'],visual_name=visual['name'],visual_reason='촬영 원본의 같은 실제 대사 장면 연결')
+                            else:
+                                # Keep real dubbing as a pending voice; never fabricate an upload-order shot.
+                                item.update(status='needs_scene',reason='더빙 대사 일치 · 연결할 실제 영상 후보를 선택해 주세요.',pending_voice={'asset_id':source['id'],'start':a,'end':b})
+                                continue
                         clips.append(clip)
         report.append(item)
     # Avoid showing the same source frames twice when adjacent matched sentences meet.
@@ -205,7 +218,7 @@ def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
     value['script_brief'] = brief.model_dump()
     voices={r.get('voice') for r in report if r['status']=='matched'}
     value['script_edit'] = {'lines': report, 'directing': direction, 'voice': 'mixed' if len(voices)>1 else next(iter(voices),'original'),
-                            'complete': all(r['status']=='matched' for r in report)}
+                            'complete': all(r['status'] in ['matched','selected'] for r in report)}
     value['clips'] = clips
     value['cut_removals'] = []
     if clips:
@@ -213,5 +226,5 @@ def assemble(brief, state, assets, voice_mode='auto', check=lambda: None):
         timeline.export_groups(value,'full')
         if state.get('captions',{}).get('items'):
             # Preserve previous text and archive unmatched manual edits through the existing synchronizer.
-            value['captions'] = timeline.generate_captions(value,assets)
+            value['captions'] = timeline.sync_captions(state,value,assets)
     return value

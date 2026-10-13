@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock
 from pydantic import BaseModel, Field, StrictInt
 
-from . import db, timeline, worker, planning, proofreading, storage, script_edit
+from . import db, timeline, worker, planning, proofreading, storage, script_edit, scene_index, scene_search
 from .settings import CHUNK_BYTES, DATA, MAX_FILE_BYTES, MAX_INPUT_SECONDS, MAX_OUTPUT_SECONDS, MODEL_DIR, MODEL_NAME, ROOT
 
 LOCKS = {}
@@ -194,6 +194,9 @@ class Edit(BaseModel):
 def save(ident, revision, state, name):
     current = project(ident)
     timeline.validate_state(state, {a['id']: a for a in current['assets']})
+    validate_products(ident,state.get('scene_products',[]))
+    if timeline.signature(state)!=timeline.signature(current['state']) and state.get('captions',{}).get('items') and state['captions'].get('signature')!=timeline.signature(state):
+        state['captions']=timeline.sync_captions(current['state'],state,{a['id']:a for a in current['assets']})
     if state.get('planning'):
         planning.validate_plan(state['planning'])
     if state.get('script_brief'):
@@ -397,6 +400,106 @@ class AutoCut(BaseModel):
     after: float = Field(default=.2, ge=0, le=2, allow_inf_nan=False)
 
 
+
+
+def validate_products(project_id,products):
+    if not isinstance(products,list) or len(products)>30:raise HTTPException(422,'제품 정보는 최대 30개입니다.')
+    parsed=[scene_search.Product.model_validate(p) for p in products]
+    if any(p.brand and scene_search.canonical(alias)==scene_search.canonical(p.brand) for p in parsed for alias in p.aliases):
+        raise HTTPException(422,'브랜드명만 제품 별칭으로 등록하면 다른 맛·제품과 구분할 수 없습니다.')
+    if len({scene_search.canonical(p.name) for p in parsed})!=len(parsed):raise HTTPException(422,'서로 다른 맛·제품은 구분되는 제품명으로 등록하세요.')
+    with db.connection() as conn:
+        allowed={r['id'] for r in conn.execute('SELECT id FROM product_references WHERE project_id=?',(project_id,))}
+    if any(ref not in allowed for p in parsed for ref in p.reference_ids):raise HTTPException(422,'이 프로젝트에 올린 참고 이미지만 사용하세요.')
+    return parsed
+
+
+@app.post('/api/projects/{ident}/product-references')
+async def reference_image(ident:str,request:Request):
+    project(ident)
+    data=bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data)>8*1024*1024:raise HTTPException(413,'참고 이미지는 8MB 이하입니다.')
+    from PIL import Image, UnidentifiedImageError
+    import io
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.width*image.height>20_000_000:raise HTTPException(413,'참고 이미지 해상도가 너무 큽니다.')
+            image=image.convert('RGB');image.thumbnail((1600,1600))
+            ref=db.uid();folder=DATA/'references'/ref;folder.mkdir(parents=True)
+            image.save(folder/'image.jpg',quality=90)
+    except (UnidentifiedImageError,OSError,Image.DecompressionBombError):raise HTTPException(422,'읽을 수 있는 JPG·PNG·WEBP 이미지를 올려 주세요.')
+    with db.connection() as conn:conn.execute('INSERT INTO product_references VALUES (?,?)',(ref,ident))
+    return {'id':ref}
+
+
+@app.get('/api/assets/{ident}/scenes')
+def scene_records(ident:str):
+    asset=db.get_asset(ident)
+    rows,_=scene_index.load(ident)
+    return {'asset_id':ident,'filename':asset['name'],'analysis':asset['analysis'].get('scenes',{}),'scenes':rows}
+
+
+@app.get('/api/assets/{ident}/scenes/{frame}.jpg')
+def scene_thumbnail(ident:str,frame:str):
+    asset=db.get_asset(ident)
+    if len(frame)!=12 or not frame.isdigit():raise HTTPException(404,'관측 프레임을 찾을 수 없습니다.')
+    path=scene_index.directory(asset['id'])/(frame+'.jpg')
+    if not path.is_file():raise HTTPException(404,'관측 프레임을 찾을 수 없습니다.')
+    return FileResponse(path,media_type='image/jpeg')
+
+
+class SceneChoice(BaseModel):
+    revision: StrictInt
+    line: StrictInt=Field(ge=1,le=100)
+    candidate_id: str=Field(max_length=100)
+    illustration: bool=False
+
+
+@app.post('/api/projects/{ident}/script-edit/{job_id}/scene')
+def select_scene(ident:str,job_id:str,body:SceneChoice):
+    current=project(ident)
+    with db.connection() as conn:
+        job=conn.execute("SELECT payload,result,status FROM jobs WHERE id=? AND project_id=? AND kind='script_edit'",(job_id,ident)).fetchone()
+    if not job or job['status']!='completed':raise HTTPException(409,'장면 검색이 끝난 뒤 선택해 주세요.')
+    payload=json.loads(job['payload']);result=json.loads(job['result'])
+    if result.get('revision',payload['revision'])!=current['revision'] or body.revision!=current['revision']:
+        raise HTTPException(409,'편집이 변경됐어요. 최신 편집에서 다시 검색하거나 선택하세요.')
+    row=next((r for r in result.get('lines',[]) if r['line']==body.line),None)
+    candidate=next((c for c in (row or {}).get('exact',[])+(row or {}).get('supporting',[]) if c['id']==body.candidate_id),None)
+    if not candidate:raise HTTPException(422,'이 대본 문장의 실제 검색 후보만 선택할 수 있습니다.')
+    if candidate['match_type'] in ['보조 장면','확인 필요'] and not body.illustration:
+        raise HTTPException(422,'정확한 일치가 아닌 후보입니다. 원본 확인 후 보조 장면 사용을 명시하세요.')
+    if row['status']=='placeholder':raise HTTPException(422,'미정 대본 내용을 먼저 채워 주세요.')
+    state=current['state']
+    if not result.get('applied'):
+        payload['before_state']=json.loads(json.dumps(state))
+        state['clips']=[];state['script_brief']=payload['brief']
+        state['script_edit']={key:result[key] for key in ['lines','directing','voice','complete']}
+    if state.get('script_brief')!=payload['brief']:raise HTTPException(409,'대본이 달라졌어요. 다시 검색하세요.')
+    voice=row.get('pending_voice') or row.get('selected_voice')
+    if not voice and row.get('status')=='matched' and row.get('asset_id'):
+        voice={'asset_id':row['asset_id'],'start':max(0,row['start']-.12),'end':min(next(a['metadata']['duration'] for a in current['assets'] if a['id']==row['asset_id']),row['end']+.2)}
+    clip={'id':db.uid(),'asset_id':candidate['asset_id'],'start':candidate['start'],'end':candidate['end'],
+          'script_line':body.line,'label':f'{body.line}. '+row['script'][:45],'frame':{'mode':'fit','x':.5,'y':.5,'zoom':1},
+          'scene_choice':{'candidate_id':candidate['id'],'match_type':candidate['match_type'],'user_reviewed':True,'illustration':body.illustration}}
+    if voice:
+        clip.update(asset_id=voice['asset_id'],start=voice['start'],end=voice['end'],visual_asset_id=candidate['asset_id'],visual_start=candidate['start'],visual_end=candidate['end'])
+    state['clips']=[c for c in state['clips'] if c.get('script_line')!=body.line]+[clip]
+    state['clips'].sort(key=lambda c:c.get('script_line',101))
+    row.update(status='selected',selected_voice=voice,selected_candidate=candidate,reason='사용자가 원본을 확인하고 '+('보조 장면으로 선택' if body.illustration else '장면 선택'),user_reviewed=True)
+    row['voice']='dubbing' if voice and not next(a for a in current['assets'] if a['id']==voice['asset_id'])['metadata'].get('has_video',True) else 'original'
+    voices={r.get('voice','original') for r in result['lines'] if r['status'] in ['matched','selected']}
+    state['script_edit']['voice']='mixed' if len(voices)>1 else next(iter(voices),'original')
+    state['script_edit']['lines']=result['lines'];state['script_edit']['complete']=all(r['status'] in ['matched','selected'] for r in result['lines'])
+    updated=save(ident,body.revision,state,current['name'])
+    result.update(applied=True,voice=state['script_edit']['voice'],complete=state['script_edit']['complete'],revision=updated['revision'],signature=updated['signature'],render_signature=updated['render_signature'],files=[],
+                  matched=sum(r['status'] in ['matched','selected'] for r in result['lines']),after_seconds=updated['duration'])
+    payload['render_state']=updated['state']
+    with db.connection() as conn:conn.execute('UPDATE jobs SET payload=?,result=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),json.dumps(result,ensure_ascii=False),job_id))
+    return updated
+
 class ScriptEdit(BaseModel):
     revision: StrictInt
     brief: script_edit.Brief
@@ -414,11 +517,12 @@ def edit_script(ident: str, body: ScriptEdit, request: Request):
     dubbing = [a for a in assets if not a['metadata'].get('has_video',True)]
     chosen = dubbing if body.voice_mode=='dubbing' else [a for a in assets if a['metadata'].get('has_video',True)] if body.voice_mode=='original' else assets
     chosen = [a for a in chosen if a['metadata']['has_audio']]
-    if not chosen:
-        raise HTTPException(422, '대사를 들을 수 있는 원본 또는 직접 녹음한 더빙 파일을 올려 주세요.')
+
     setup = getattr(request.app.state,'desktop_setup',None)
-    if any(not a['analysis'].get('transcribed') for a in chosen) and ((setup and setup.snapshot()['status']!='ready') or not (MODEL_DIR/'model.bin').exists()):
-        raise HTTPException(503, '대본을 실제 음성과 맞추려면 자막 모델 준비가 필요해요. 상단 준비 완료 후 실행해 주세요.')
+    speech_ready=(setup.snapshot()['status']=='ready') if setup else (MODEL_DIR/'model.bin').exists()
+    # Silent visual search remains available while speech models are preparing.
+    available=[a for a in chosen if speech_ready or a['analysis'].get('transcribed')]
+    validate_products(ident,current['state'].get('scene_products',[]))
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if conn.execute('SELECT revision FROM projects WHERE id=?',(ident,)).fetchone()['revision']!=body.revision:
@@ -426,7 +530,7 @@ def edit_script(ident: str, body: ScriptEdit, request: Request):
         if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit') AND status IN ('queued','running')",(ident,)).fetchone():
             raise HTTPException(409,'자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
         job_id=db.uid()
-        payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in chosen], 'model':MODEL_NAME}
+        payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in available], 'model':MODEL_NAME, 'speech_skipped':len(chosen)-len(available)}
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
                      (job_id,ident,'script_edit','queued',json.dumps(payload,ensure_ascii=False),time.time(),time.time()))
     return {'job_id':job_id}
