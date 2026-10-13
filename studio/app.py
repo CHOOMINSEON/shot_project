@@ -495,9 +495,9 @@ def select_scene(ident:str,job_id:str,body:SceneChoice):
     state['script_edit']['lines']=result['lines'];state['script_edit']['complete']=all(r['status'] in ['matched','selected'] for r in result['lines'])
     updated=save(ident,body.revision,state,current['name'])
     result.update(applied=True,voice=state['script_edit']['voice'],complete=state['script_edit']['complete'],revision=updated['revision'],signature=updated['signature'],render_signature=updated['render_signature'],files=[],
-                  matched=sum(r['status'] in ['matched','selected'] for r in result['lines']),after_seconds=updated['duration'])
+                  matched=sum(r['status'] in ['matched','selected'] for r in result['lines']),after_seconds=updated['duration'],notice='확인한 실제 장면을 대본 순서에 연결했습니다.')
     payload['render_state']=updated['state']
-    with db.connection() as conn:conn.execute('UPDATE jobs SET payload=?,result=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),json.dumps(result,ensure_ascii=False),job_id))
+    with db.connection() as conn:conn.execute('UPDATE jobs SET payload=?,result=?,updated=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),json.dumps(result,ensure_ascii=False),time.time(),job_id))
     return updated
 
 class ScriptEdit(BaseModel):

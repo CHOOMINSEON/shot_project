@@ -16,6 +16,8 @@ with sync_playwright() as p:
  page.wait_for_timeout(2000) # Polling must preserve expanded review panels.
  page.locator('[data-scene-preview]').first.click();page.wait_for_function("()=>document.querySelector('#player').currentTime>0")
  page.locator('[data-scene-select][data-scene-aux=false]').first.click();page.wait_for_function("()=>document.querySelector('#script-status').textContent.includes('대본 편집 완료')")
+ page.wait_for_function("()=>document.querySelector('#script-report').textContent.includes('사용자 선택')")
+ assert '확인한 실제 장면을 대본 순서에 연결했습니다.' in page.locator('#script-status').inner_text()
  assert not page.locator('#final-download').is_disabled()
  with page.expect_download(timeout=120000) as downloaded:page.locator('#final-download').click()
  file=Path(downloaded.value.path());assert file.stat().st_size>1000;print('Real silent source → scene intent/retrieval → original playback → manual selection → final MP4 button download:',file.stat().st_size)

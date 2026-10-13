@@ -209,7 +209,7 @@ def render(ident, payload):
                               'original_start': clip['start'], 'original_end': clip['end'],
                               'edited_start': elapsed, 'edited_end': elapsed + clip_length, 'frame': clip.get('frame', {}),
                               'visual_asset_id': clip.get('visual_asset_id'), 'visual_source_name': visual['name'] if visual else None,
-                              'visual_start': clip.get('visual_start',0)})
+                              'visual_start': clip.get('visual_start',0),'visual_end':clip.get('visual_end')})
             elapsed += clip_length
         prefix = base if len(groups) == 1 else f'{gi:03}_{base}'
         output = target / f'{prefix}.mp4'

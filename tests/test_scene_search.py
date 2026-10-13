@@ -31,6 +31,8 @@ def test_intent_expands_abstract_meaning_without_inventing_emotion():
     for line,meaning in [('기대했는데 별로다','disappointment'),('다시 사 먹고 싶다','repurchase')]:
         intent=s.intent(line);assert meaning in intent['abstract_meaning'] and intent['personal_evaluation_required']
     assert not s.intent('아무 내용 없이')['understood']
+    assert not s.intent('이 돈 주고 먹을 만할까?')['actions']
+    assert not s.intent('다시 사 먹고 싶다')['actions']
 
 
 def test_product_identity_combines_package_text_variant_and_continuity():

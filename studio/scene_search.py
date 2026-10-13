@@ -67,6 +67,8 @@ def intent(line,products=(),previous=None):
     actions=[k for k,terms in ACTIONS.items() if any(t in text for t in terms)]
     visual=[k for k,terms in VISUAL.items() if any(t in text for t in terms)]
     meanings=[k for k,terms in ABSTRACT.items() if any(t in text for t in terms)]
+    if any(term in text for term in ['먹을만','사먹고싶','다시사','재구매']) and not any(term in text for term in ['시식','한입','먹어볼','먹는']):
+        actions=[a for a in actions if a!='eating']
     inherited=False
     if not targets and previous and previous.get('products') and (actions or visual or meanings):
         targets=previous['products'];inherited=True
@@ -88,7 +90,7 @@ def intent(line,products=(),previous=None):
             'understood':bool(targets or kind or actions or visual or meanings),'registered_visual_features':appearance}
 
 
-def index_product_evidence(records,vectors,products,model,assets):
+def index_product_evidence(records,vectors,products,model,assets,check=lambda:None):
     """Exact OCR/reference evidence vs cautious temporal identity carryover."""
     refs={}
     from PIL import Image
@@ -100,7 +102,8 @@ def index_product_evidence(records,vectors,products,model,assets):
                 with Image.open(path) as image:
                     refs[p.name].extend(model.image(region) for region,_ in scene_models.views(image.convert('RGB')))
     result={};anchors={}
-    for row,vector in zip(records,vectors):
+    for number,(row,vector) in enumerate(zip(records,vectors)):
+        if number%128==0:check()
         asset=assets[row['asset_id']]
         nearby=''.join(w['text'] for w in asset['analysis'].get('words',[]) if row['start']-3<w['end'] and w['start']<row['end']+1)
         visible=canonical(' '.join(o['text'] for o in row['ocr'] if o['confidence']>=.8 and not o.get('overlay_candidate')))
@@ -170,7 +173,7 @@ class Search:
             self.records+=rows;vectors.extend(embeddings)
         self.vectors=np.asarray(vectors,dtype=np.float32)
         self.model=scene_models.load(check) if self.records else None
-        self.evidence=index_product_evidence(self.records,self.vectors,self.products,self.model,assets) if self.records else {}
+        self.evidence=index_product_evidence(self.records,self.vectors,self.products,self.model,assets,check) if self.records else {}
 
     def query(self,line,previous=None,check=lambda:None):
         request=intent(line,self.products,previous)
@@ -185,6 +188,10 @@ class Search:
         order=np.argsort(-(scores+boosts))[:100]
         exact=[];support=[];seen=[]
         requested_names={p['name'] for p in request['products']}
+        groups={};positions={}
+        for entry in self.records:
+            key=(entry['asset_id'],entry['shot']);group=groups.setdefault(key,[])
+            positions[(entry['asset_id'],entry['id'])]=len(group);group.append(entry)
         for index in order:
             check();row=self.records[index];score=float(scores[index])
             if score<.23:continue
@@ -211,7 +218,7 @@ class Search:
             if not kind_ok and not context:continue
             if request['actions'] and not action_ok and not context:continue
             if request['abstract_meaning'] and not request['actions'] and not request['visual_features']:
-                important={'eating','reaction'} if PERSONAL.intersection(request['abstract_meaning']) else set(request['expanded_tags'])
+                important={'product_full','packaging','holding','closeup'} if 'repurchase' in request['abstract_meaning'] else {'eating','reaction'} if PERSONAL.intersection(request['abstract_meaning']) else set(request['expanded_tags'])
                 if not important.intersection(actual) and not context:continue
             if not actual and not context:continue
             if request['personal_evaluation_required'] and not eval_ok:match_type='보조 장면'
@@ -220,11 +227,24 @@ class Search:
             if requested_names and not verified:uncertain.append('요청한 정확한 제품 식별 근거 부족 · 같은 종류의 음식과 구분')
             if not eval_ok:uncertain.append('개인 평가·감정·재구매 발화 근거 없음 · 표정만으로 판단하지 않음')
             for p in relevant:uncertain+=p['uncertainties']
+            price_text=[o['text'] for o in row['ocr'] if re.search(r'(?:[₩$€]\s*\d|\d[\d,]*\s*(?:원|won|KRW))',o['text'],re.I)]
+            if 'value' in request['abstract_meaning'] and not price_text:uncertain.append('화면에서 가격 정보 확인되지 않음 · 가격·가성비를 영상만으로 입증하지 않음')
             reason=[row['description']]+[reason for p in relevant for reason in p['reasons']]
+            if price_text:reason.append('관측 가격 문구: '+' / '.join(price_text))
             if evaluations and any(evaluations.values()):reason.append('근처 실제 평가 발화: '+row['transcript'])
             if match_type=='보조 장면':reason.append('문장의 의미를 직접 입증하지 않는 설명용 후보')
             ident=row['asset_id']+':'+row['id']
-            candidate={'id':ident,'asset_id':row['asset_id'],'filename':row['filename'],'start':row['start'],'end':row['end'],
+            neighbors=groups[(row['asset_id'],row['shot'])]
+            at=positions[(row['asset_id'],row['id'])]
+            before=neighbors[max(0,at-1)];after=neighbors[min(len(neighbors)-1,at+1)]
+            range_start,range_end=before['start'],after['end']
+            # Use neighboring observed frame boundaries, never guessed scene times.
+            for neighbor,side in [(before,'start'),(after,'end')]:
+                identities=self.evidence[(neighbor['asset_id'],neighbor['id'])]
+                if requested_names and any(p['status']=='confirmed' and p['name'] not in requested_names for p in identities):
+                    if side=='start':range_start=row['start']
+                    else:range_end=row['end']
+            candidate={'id':ident,'asset_id':row['asset_id'],'filename':row['filename'],'start':range_start,'end':range_end,
                        'frame_time':row['frame_time'],'match_type':match_type,'selection_reason':reason,'uncertainties':list(dict.fromkeys(uncertain)),
                        'visual_similarity':round(score,4),'products':product,'ocr':row['ocr'],'description':row['description'],
                        'transcript':row['transcript'],'thumbnail':f'/api/assets/{row["asset_id"]}/scenes/{row["id"]}.jpg',
