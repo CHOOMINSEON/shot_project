@@ -184,3 +184,7 @@ Hugging Face Docker Space용 패키지와 UID 1000 시작 구성을 준비하고
 `scripts/browser_scene_smoke.py`는 `STUDIO_DATA_DIR`, `STUDIO_TEST_URL`, `STUDIO_SCENE_TEST_VIDEO`(실제 빵 자르기 무음 영상), 선택적 `STUDIO_SCENE_TEST_SCRIPT`로 실행할 수 있습니다. 새 검증 프로젝트를 생성하며 최종 MP4의 실제 브라우저 다운로드와 JavaScript 오류 없음까지 확인합니다.
 
 최종 공개 실제 영상 재검증에서 빵 자르기 6.006–7.5075초, 도넛 시식 5.005–8.008초, 크림 노출 보조 0–1.001초를 반환했습니다. 가격·가성비 질문/재구매 의사를 실제 먹기 행동과 분리하며, 가격 OCR 근거가 없으면 그 한계를 표시합니다. OCR 제품 근거가 있으면 낮은 시각 점수만으로 후보를 누락하지 않습니다. 새 설치 절차(잠금 의존성 설치·음성 모델 로딩·장면/OCR 해시 재검증)와 시작 스크립트의 실제 HTTP 응답·로그인·브라우저 다운로드도 확인했습니다. install_script와 start_skill 초안을 저장했으며 새 환경 게시·복원 검증과 구분합니다.
+
+최종 빌드: 소스 `149a82338ae4900b512d6c6e131d8e97e5efbaf9`. Linux **84개 통과**(118.65초), [Windows Actions 38377669255](https://github.com/CHOOMINSEON/shot_project/actions/runs/38377669255) **84개 통과**(140.67초). 실제 EXE를 모델 없는 한국어·작은따옴표 포함 데이터 경로에서 실행하여 모델 자동 준비, CLIP/OCR 실제 추론(통제 영문 라벨), 프레임 인덱스/썸네일 API, 원음/더빙 대본 순서, 무음 컷/미리보기, 최종 MP4 다운로드를 확인했습니다.
+
+[최종 Windows Release](https://github.com/CHOOMINSEON/shot_project/releases/tag/desktop-windows-149a8233)와 [바로 실행 파일](https://github.com/CHOOMINSEON/shot_project/releases/download/desktop-windows-149a8233/IyoringCutStudio.exe)을 익명 HTTP 206/64바이트/Windows `MZ` 헤더로 확인했습니다. GitHub 자산 digest와 공개 SHA256SUMS가 일치합니다. EXE **349,597,196바이트**, SHA-256 `9a5bc9b8c7e13d5a07989005609f0cfd555c323fa21f15a6397cbe77ad3783b5`. 기존 Windows 프로젝트/원본 저장 위치를 유지합니다. 새 Windows 사용자 PC 및 사용자 실제 2시간 원본의 정확도·전체 부하와는 별도 검증입니다.
