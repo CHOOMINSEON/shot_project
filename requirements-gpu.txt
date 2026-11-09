@@ -1,0 +1,9 @@
+# 선택 사항: NVIDIA GPU(RTX 3070 등) 가속. 소스로 실행할 때만 해당하며 단일 EXE에는 포함되지 않습니다.
+# 이 파일은 이 개발 환경에서 설치·실행해 보지 못했습니다(미검증). CPU 방식은 그대로 동작합니다.
+# 1) 최신 NVIDIA 드라이버가 필요합니다.
+# 2) Whisper(CTranslate2): CUDA 12 + cuDNN 9 런타임
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+# 3) CLIP/OCR(onnxruntime): CPU 패키지를 제거하고 GPU 패키지로 교체해야 합니다.
+#    pip uninstall onnxruntime && pip install onnxruntime-gpu
+# 장치 선택: 기본 auto(가능하면 GPU, 실패하면 CPU). 강제로 CPU: STUDIO_DEVICE=cpu

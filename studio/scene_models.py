@@ -1,5 +1,6 @@
 """Local CPU models. Pinned revisions and checksums; never upload user frames."""
 import hashlib
+import os
 import threading
 from pathlib import Path
 
@@ -64,8 +65,12 @@ class Vision:
         from tokenizers import Tokenizer
         from rapidocr_onnxruntime import RapidOCR
         options=ort.SessionOptions();options.intra_op_num_threads=2;options.inter_op_num_threads=1
-        self.image_session=ort.InferenceSession(str(DIRECTORY/'vision.onnx'),options,providers=['CPUExecutionProvider'])
-        self.text_session=ort.InferenceSession(str(DIRECTORY/'text.onnx'),options,providers=['CPUExecutionProvider'])
+        providers=['CPUExecutionProvider']
+        if os.getenv('STUDIO_DEVICE','auto').lower()!='cpu' and 'CUDAExecutionProvider' in ort.get_available_providers():
+            providers=['CUDAExecutionProvider','CPUExecutionProvider']  # onnxruntime-gpu가 설치된 경우에만
+        self.providers=providers
+        self.image_session=ort.InferenceSession(str(DIRECTORY/'vision.onnx'),options,providers=providers)
+        self.text_session=ort.InferenceSession(str(DIRECTORY/'text.onnx'),options,providers=providers)
         self.tokenizer=Tokenizer.from_file(str(DIRECTORY/'tokenizer.json'))
         self.tokenizer.enable_truncation(max_length=77)
         self.tokenizer.enable_padding(length=77,pad_id=49407,pad_token='<|endoftext|>')

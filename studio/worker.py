@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, timeline, proofreading, script_edit, scene_index, scene_search
+from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
 from .media import Cancelled, probe, render_piece, run_ffmpeg
 from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
@@ -47,10 +47,36 @@ def update(ident, value, message):
     db.update_job(ident, progress=max(0, min(1, value)), message=message)
 
 
+MODEL_DEVICE = 'cpu'
+# 한국어 철자·띄어쓰기 기준을 잡아 주는 짧은 문맥(인식 결과에 끼워 넣지 않고 모델의 참고용으로만 사용).
+KOREAN_CONTEXT = '편의점 신상 라면 아이스크림 간식 먹방 리뷰입니다. 맛있어요, 쫄깃해요, 바삭해요, 가격은 이천오백 원이에요.'
+
+
+def _open_model(factory, directory):
+    """GPU(CUDA)가 쓸 수 있으면 사용하고, 로딩·시험 인식이 실패하면 CPU로 되돌린다.
+
+    STUDIO_DEVICE=cpu 로 강제할 수 있다. CUDA 12 / cuDNN 9 런타임이 없으면 자동으로 CPU를 쓴다.
+    """
+    global MODEL_DEVICE
+    wanted = os.getenv('STUDIO_DEVICE', 'auto').lower()
+    if wanted != 'cpu':
+        try:
+            import ctranslate2
+            if ctranslate2.get_cuda_device_count() > 0:
+                model = factory(str(directory), device='cuda', compute_type='float16')
+                list(model.transcribe(np.zeros(16000, dtype=np.float32), language='ko', vad_filter=False)[0])  # 실제 추론 확인
+                MODEL_DEVICE = 'cuda'
+                return model
+        except Exception:
+            pass  # CUDA 라이브러리 누락 등 → CPU
+    MODEL_DEVICE = 'cpu'
+    return factory(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
+
+
 def load_model(name=None):
     global MODEL, MODEL_ID
     name = name or MODEL_NAME
-    if name not in ['tiny', 'base', 'small', 'medium']:
+    if name not in ['tiny', 'base', 'small', 'medium', 'large-v3']:
         raise ValueError('지원하지 않는 음성 인식 모델입니다.')
     directory = DATA / 'models' / f'whisper-{name}'
     if name == 'base' and not (directory / 'model.bin').exists():
@@ -61,7 +87,7 @@ def load_model(name=None):
                 raise ValueError('음성 인식 모델이 준비되지 않았습니다. 서버에서 scripts/download_model.py를 실행해 주세요. 공백 분석과 수동 편집은 모델 없이 사용할 수 있습니다.')
             from faster_whisper import WhisperModel
             MODEL = None
-            MODEL = WhisperModel(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
+            MODEL = _open_model(WhisperModel, directory)
             MODEL_ID = name
         return MODEL
 
@@ -129,8 +155,9 @@ def analyze(ident, payload):
             chunk = audio[int((sec - left) * 16000):int(min(right, sec + .25) * 16000 - left * 16000)]
             data['peaks'].append(round(float(np.max(np.abs(chunk))) if len(chunk) else 0., 3))
         if model:
+            prompt = (KOREAN_CONTEXT + ' ' + payload.get('vocabulary', ''))[:1000].strip()
             segments, _ = model.transcribe(audio, language='ko', word_timestamps=True, beam_size=5,
-                                          vad_filter=True, initial_prompt=payload.get('vocabulary', '')[:1000],
+                                          vad_filter=True, initial_prompt=prompt,
                                           hotwords=payload.get('vocabulary', '')[:1000],
                                           condition_on_previous_text=False, hallucination_silence_threshold=1.)
             for segment in segments:
@@ -182,7 +209,7 @@ def render(ident, payload):
     if shutil.disk_usage(DATA).free < estimate:
         raise ValueError('대기 중 서버 저장 공간이 줄었습니다. 출력 파일을 정리하거나 저장 공간을 늘린 뒤 재시도해 주세요.')
     elapsed = 0.
-    file_list, edit_list = [], []
+    file_list, edit_list, group_ranges = [], [], []
     base = payload['filename']
     for gi, (label, clips) in enumerate(groups, 1):
         pieces = []
@@ -222,6 +249,7 @@ def render(ident, payload):
         if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
             raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')
         file_list.append({'name': output.name, 'size': output.stat().st_size, 'label': label, 'type': 'video'})
+        group_ranges.append({'file': output.name, 'start': group_start, 'end': elapsed, 'label': label})
         if not preview:
             local = timeline.local_captions(items, group_start, elapsed)
             if local or len(groups) == 1:
@@ -231,6 +259,10 @@ def render(ident, payload):
     if not preview:
         manifest = {'revision': payload['revision'], 'timeline_signature': timeline.signature(state), 'mode': payload['mode'],
                     'clips': edit_list, 'notice': '캡컷 프로젝트 파일이 아닌 참고·복원용 편집 목록입니다.'}
+        # 컷 경계를 다른 편집기로 옮기기 위한 보조 파일(캡컷 직접 가져오기는 미검증 → exports.py 설명 참고)
+        for name, content in exports.package(edit_list, group_ranges, state.get('fps', 30), base).items():
+            (target / name).write_text(content, encoding='utf-8')
+            file_list.append({'name': name, 'size': (target / name).stat().st_size, 'type': 'manifest'})
         atomic_json(target / 'edit-list.json', manifest)
         file_list.append({'name': 'edit-list.json', 'size': (target / 'edit-list.json').stat().st_size, 'type': 'manifest'})
         if len(groups) > 1 and items:
@@ -407,6 +439,110 @@ def edit_script(ident, payload):
     return {**result,**exported}
 
 
+def guided_edit(ident, payload):
+    """편집 지침 기반 자동 편집: 전사 → 장면·OCR 인덱스 → 제품 근거 → 규칙 기반 구간 선택 → 미리보기."""
+    with db.connection() as conn:
+        job = conn.execute('SELECT project_id,result FROM jobs WHERE id=?', (ident,)).fetchone()
+    result = json.loads(job['result'])
+    if not result.get('applied'):
+        with db.connection() as conn:
+            raw = conn.execute('SELECT state FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+        product_info = json.loads(raw['state']).get('scene_products', [])
+        vocabulary = ', '.join(' '.join([p.get('name', ''), p.get('brand', ''), p.get('variant', '')]) for p in product_info)[:1000]
+        for index, asset_id in enumerate(payload['speech_ids']):
+            check_cancel(ident)
+            asset = db.get_asset(asset_id)
+            if not asset['analysis'].get('transcribed'):
+                update(ident, 0, f'{index + 1}/{len(payload["speech_ids"])} · 실제 발화 인식: {asset["name"]}')
+                analyze(ident, {'asset_id': asset_id, 'transcribe': True, 'model': payload['model'], 'script_asset_checkpoint': True,
+                                'vocabulary': vocabulary, 'names': [p['name'] for p in product_info]})
+        check_cancel(ident)
+        assets = {a: db.get_asset(a) for a in payload['asset_ids']}
+        audio_sources = set(payload.get('audio_source_ids') or [])
+        # 소리만 쓸 영상(또는 오디오 파일)은 장면 선택 대상이 아니라 '입힐 소리' 목록으로 보낸다.
+        videos = [a for a in assets.values() if a['metadata'].get('has_video', True) and a['id'] not in audio_sources]
+        narration = [a for a in assets.values() if not a['metadata'].get('has_video', True) or a['id'] in audio_sources]
+        for n, asset in enumerate(videos):
+            summary = scene_index.build(asset, lambda: check_cancel(ident), lambda v, m: update(ident, .1 + .24 * (n + v) / len(videos), m))
+            with db.connection() as conn:
+                analysis = {**db.get_asset(asset['id'])['analysis'], 'scenes': summary}
+                conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(analysis, ensure_ascii=False), asset['id']))
+            asset['analysis'] = analysis
+        update(ident, .36, '제품 근거(OCR·참고 이미지·연속성) 계산')
+        with db.connection() as conn:
+            snapshot = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+        if snapshot['revision'] != payload['revision']:
+            raise ValueError('분석 중 편집이 변경되어 기존 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
+        before = json.loads(snapshot['state'])
+        scenes = scene_search.Search(assets, before.get('scene_products', []), lambda: check_cancel(ident), '')
+        frames_by_asset = {}
+        for row in scenes.records:
+            frames_by_asset.setdefault(row['asset_id'], []).append(row)
+        style = payload['style']
+        detected = None
+        if style == 'auto':
+            style, confidence, reasons = guided.detect_style(list(assets.values()), frames_by_asset)
+            detected = {'style': style, 'confidence': confidence, 'reasons': reasons}
+        rules = guided.parse_guideline(payload['guideline'], style)
+        if payload.get('frame') in ('blur', 'fill', 'fit'):
+            rules['frame'] = payload['frame']
+        rules = guided.apply_profile(rules, before.get('style_profile'))
+        update(ident, .5, '지침에 따라 구간 선택·구성')
+        planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+        lines = []
+        for item in narration:
+            lines += guided.narration_lines(item)
+        previous = None
+        for n, line in enumerate(lines):
+            check_cancel(ident)
+            update(ident, .5 + .1 * n / max(1, len(lines)), f'나레이션 {n + 1}/{len(lines)} · 어울리는 영상 후보 찾기')
+            found = scenes.query(line['text'], previous, lambda: check_cancel(ident))
+            previous = found['intent']
+            keep = ['id', 'asset_id', 'filename', 'start', 'end', 'match_type', 'thumbnail', 'selection_reason', 'uncertainties']
+            line['suggestions'] = [{k: c[k] for k in keep} for c in found['exact'][:3] + found['supporting'][:3]]
+        report = {k: planned[k] for k in ['units', 'removed', 'moved', 'warnings', 'missing', 'review', 'seconds', 'target', 'style', 'applied', 'unapplied']}
+        report.update(style_name=guided.STYLES[style]['name'], style_note=guided.STYLES[style]['note'], detected=detected,
+                      narration=lines, narration_expected=guided.STYLES[style]['narration'])
+        if not planned['clips']:
+            return {'applied': False, **report, 'files': [], 'preview': True, 'notice': '선택할 구간을 찾지 못해 기존 편집을 유지했어요.'}
+        check_cancel(ident)
+        state = {**before, 'clips': planned['clips'], 'cut_removals': [], 'guided': report,
+                 'guided_brief': {'guideline': payload['guideline'], 'style': style}}
+        state.pop('script_edit', None)
+        state.pop('script_brief', None)
+        assets_full = {a['id']: a for a in assets.values()}
+        timeline.validate_state(state, assets_full)
+        if before.get('captions', {}).get('items'):
+            state['captions'] = timeline.sync_captions(before, state, assets_full)
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+            if row['revision'] != payload['revision']:
+                raise ValueError('분석 중 편집이 변경되어 기존 편집을 유지했어요. 최신 상태에서 다시 실행해 주세요.')
+            if STOP.is_set() or conn.execute('SELECT cancel FROM jobs WHERE id=?', (ident,)).fetchone()['cancel']:
+                raise Cancelled()
+            if len(json.dumps(state, ensure_ascii=False).encode()) > 4 * 1024 * 1024:
+                raise ValueError('편집 정보가 너무 큽니다. 원본을 나눠 주세요.')
+            revision = row['revision'] + 1
+            result = {'applied': True, **report, 'files': [], 'preview': True, 'revision': revision,
+                      'signature': timeline.signature(state), 'render_signature': timeline.render_signature(state),
+                      'before_seconds': timeline.duration(before['clips']), 'after_seconds': timeline.duration(state['clips'])}
+            payload = {**payload, 'before_state': before, 'render_state': state}
+            conn.execute('UPDATE projects SET state=?,revision=?,updated=? WHERE id=?',
+                         (json.dumps(state, ensure_ascii=False), revision, time.time(), job['project_id']))
+            conn.execute('UPDATE jobs SET payload=?,result=? WHERE id=?',
+                         (json.dumps(payload, ensure_ascii=False), json.dumps(result, ensure_ascii=False), ident))
+    try:
+        exported = render(ident, {'state': {**payload['render_state'], 'captions': {'items': []}}, 'revision': result['revision'],
+                                  'mode': 'full', 'preview': True, 'filename': '지침_자동편집_미리보기',
+                                  'progress_offset': .6, 'progress_scale': .4})
+    except Cancelled:
+        raise
+    except Exception as exc:
+        return {**result, 'notice': '자동 편집은 적용됐어요. 미리보기 파일 생성 실패: ' + str(exc)[:500]}
+    return {**result, **exported}
+
+
 def loop():
     # One worker / one uvicorn process. Durable queued jobs survive a server restart.
     with db.connection() as conn:
@@ -422,7 +558,8 @@ def loop():
         try:
             check_cancel(ident)
             payload = json.loads(row['payload'])
-            result = {'ingest': ingest, 'analyze': analyze, 'render': render, 'auto_cut': auto_cut, 'script_edit': edit_script}[row['kind']](ident, payload)
+            result = {'ingest': ingest, 'analyze': analyze, 'render': render, 'auto_cut': auto_cut, 'script_edit': edit_script,
+                      'guided_edit': guided_edit}[row['kind']](ident, payload)
             check_cancel(ident)
             db.update_job(ident, status='completed', progress=1, message='완료', result=result)
             shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)

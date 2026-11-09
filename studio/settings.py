@@ -11,8 +11,8 @@ WINDOW_SECONDS = 120
 THREADS = max(1, min(4, int(os.getenv('STUDIO_FFMPEG_THREADS', '2'))))
 JOB_TIMEOUT = int(os.getenv('STUDIO_JOB_TIMEOUT_SECONDS', '86400'))
 MODEL_NAME = os.getenv('STUDIO_WHISPER_MODEL', 'medium')
-if MODEL_NAME not in ['tiny', 'base', 'small', 'medium']:
-    raise ValueError('STUDIO_WHISPER_MODEL must be tiny, base, small or medium')
+if MODEL_NAME not in ['tiny', 'base', 'small', 'medium', 'large-v3']:
+    raise ValueError('STUDIO_WHISPER_MODEL must be tiny, base, small, medium or large-v3')
 MODEL_DIR = DATA / 'models' / f'whisper-{MODEL_NAME}'
 for directory in [DATA, DATA / 'assets', DATA / 'work', DATA / 'exports', DATA / 'models']:
     directory.mkdir(parents=True, exist_ok=True)

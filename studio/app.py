@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock
 from pydantic import BaseModel, Field, StrictInt
 
-from . import db, timeline, worker, planning, proofreading, storage, script_edit, scene_index, scene_search
+from . import db, timeline, worker, planning, proofreading, storage, script_edit, scene_index, scene_search, guided
 from .settings import CHUNK_BYTES, DATA, MAX_FILE_BYTES, MAX_INPUT_SECONDS, MAX_OUTPUT_SECONDS, MODEL_DIR, MODEL_NAME, ROOT
 
 LOCKS = {}
@@ -139,7 +139,7 @@ def config(request: Request):
     ready = setup.snapshot()['status'] == 'ready' if setup else (MODEL_DIR / 'model.bin').exists()
     return {'max_file_bytes': MAX_FILE_BYTES, 'max_input_seconds': MAX_INPUT_SECONDS,
             'max_output_seconds': MAX_OUTPUT_SECONDS, 'chunk_bytes': CHUNK_BYTES,
-            'model_ready': ready, 'model_name': MODEL_NAME, 'free_bytes': usage.free, 'desktop': setup is not None,
+            'model_ready': ready, 'model_name': MODEL_NAME, 'device': worker.MODEL_DEVICE, 'free_bytes': usage.free, 'desktop': setup is not None,
             'privacy': '영상과 오디오는 이 앱의 서버에서 처리합니다. 외부 음성 인식 API에 전송하지 않습니다.'}
 
 
@@ -527,13 +527,112 @@ def edit_script(ident: str, body: ScriptEdit, request: Request):
         conn.execute('BEGIN IMMEDIATE')
         if conn.execute('SELECT revision FROM projects WHERE id=?',(ident,)).fetchone()['revision']!=body.revision:
             raise HTTPException(409,'편집이 변경되었어요. 최신 편집에서 다시 실행해 주세요.')
-        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit') AND status IN ('queued','running')",(ident,)).fetchone():
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit','guided_edit') AND status IN ('queued','running')",(ident,)).fetchone():
             raise HTTPException(409,'자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
         job_id=db.uid()
         payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in available], 'model':MODEL_NAME, 'speech_skipped':len(chosen)-len(available)}
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
                      (job_id,ident,'script_edit','queued',json.dumps(payload,ensure_ascii=False),time.time(),time.time()))
     return {'job_id':job_id}
+
+
+@app.get('/api/guided/defaults')
+def guided_defaults():
+    return {'guideline': guided.DEFAULT_GUIDELINE, 'styles': [{'key': k, 'name': v['name'], 'note': v['note'], 'target': list(v['target']),
+                                           'narration': v['narration']} for k, v in guided.STYLES.items()]}
+
+
+class GuidedEdit(BaseModel):
+    revision: StrictInt
+    guideline: str = Field(default='', max_length=6000)
+    style: str = Field(default='auto', pattern='^(auto|oneshot|cook_mukbang|recipe|vlog|restaurant)$')
+    frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
+    audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
+
+
+@app.post('/api/projects/{ident}/guided-edit')
+def guided_edit(ident: str, body: GuidedEdit, request: Request):
+    current = project(ident)
+    assets = [a for a in current['assets'] if a['status'] == 'ready']
+    if not any(a['metadata'].get('has_video', True) for a in assets):
+        raise HTTPException(422, '촬영 영상을 먼저 올려 주세요.')
+    if any(a['status'] in ['checking', 'uploading'] for a in current['assets']):
+        raise HTTPException(409, '업로드와 검사가 끝나면 실행해 주세요.')
+    setup = getattr(request.app.state, 'desktop_setup', None)
+    speech_ready = (setup.snapshot()['status'] == 'ready') if setup else (MODEL_DIR / 'model.bin').exists()
+    spoken = [a for a in assets if a['metadata'].get('has_audio')]
+    available = [a for a in spoken if speech_ready or a['analysis'].get('transcribed')]
+    validate_products(ident, current['state'].get('scene_products', []))
+    guideline = body.guideline.strip() or guided.DEFAULT_GUIDELINE
+    by_id = {a['id']: a for a in assets}
+    audio_sources = list(dict.fromkeys(body.audio_source_ids))
+    for sid in audio_sources:
+        if sid not in by_id or not by_id[sid]['metadata'].get('has_audio'):
+            raise HTTPException(422, '소리만 쓸 영상은 오디오가 있는 업로드 파일이어야 해요.')
+    if not [a for a in assets if a['metadata'].get('has_video', True) and a['id'] not in audio_sources]:
+        raise HTTPException(422, '영상으로 쓸 촬영본이 최소 1개 필요해요. 모든 영상을 소리 전용으로 지정할 수 없어요.')
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute('SELECT revision FROM projects WHERE id=?', (ident,)).fetchone()['revision'] != body.revision:
+            raise HTTPException(409, '편집이 변경되었어요. 최신 편집에서 다시 실행해 주세요.')
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit','guided_edit') AND status IN ('queued','running')", (ident,)).fetchone():
+            raise HTTPException(409, '자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
+        job_id = db.uid()
+        payload = {**body.model_dump(), 'guideline': guideline, 'audio_source_ids': audio_sources, 'asset_ids': [a['id'] for a in assets],
+                   'speech_ids': [a['id'] for a in available], 'model': MODEL_NAME, 'speech_skipped': len(spoken) - len(available)}
+        conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
+                     (job_id, ident, 'guided_edit', 'queued', json.dumps(payload, ensure_ascii=False), time.time(), time.time()))
+    return {'job_id': job_id}
+
+
+class NarrationLink(BaseModel):
+    revision: StrictInt
+    line: StrictInt = Field(ge=0, le=500)
+    candidate_id: str | None = Field(default=None, max_length=100)
+    asset_id: str | None = Field(default=None, max_length=64)
+    start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    end: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+@app.post('/api/projects/{ident}/guided-edit/{job_id}/narration')
+def link_narration(ident: str, job_id: str, body: NarrationLink):
+    """나레이션 한 문장을 사용자가 확인한 장면(추천 후보 또는 직접 지정한 시간)에 연결."""
+    current = project(ident)
+    with db.connection() as conn:
+        job = conn.execute("SELECT payload,result,status FROM jobs WHERE id=? AND project_id=? AND kind='guided_edit'", (job_id, ident)).fetchone()
+    if not job or job['status'] != 'completed':
+        raise HTTPException(409, '자동 편집이 끝난 뒤 연결해 주세요.')
+    payload, result = json.loads(job['payload']), json.loads(job['result'])
+    if not result.get('applied') or result.get('revision', 0) != current['revision'] or body.revision != current['revision']:
+        raise HTTPException(409, '편집이 변경됐어요. 최신 편집 기준으로 다시 선택하세요.')
+    line = next((x for x in result.get('narration', []) if x['index'] == body.line), None)
+    if not line:
+        raise HTTPException(404, '나레이션 문장을 찾을 수 없습니다.')
+    assets = {a['id']: a for a in current['assets']}
+    if body.candidate_id:
+        candidate = next((c for c in line['suggestions'] if c['id'] == body.candidate_id), None)
+        if not candidate:
+            raise HTTPException(422, '이 문장의 추천 후보만 선택할 수 있습니다.')
+        visual = {'asset_id': candidate['asset_id'], 'start': candidate['start'], 'end': candidate['end']}
+    elif body.asset_id is not None and body.start is not None and body.end is not None:
+        source = assets.get(body.asset_id)
+        if not source or not source['metadata'].get('has_video', True) or not 0 <= body.start < body.end <= source['metadata']['duration'] + .001:
+            raise HTTPException(422, '영상 원본과 시간 범위를 확인해 주세요.')
+        visual = {'asset_id': body.asset_id, 'start': body.start, 'end': body.end}
+    else:
+        raise HTTPException(422, '추천 후보 또는 영상 구간을 지정해 주세요.')
+    state, warnings = guided.link_narration(current['state'], line, visual, assets, current['state'].get('fps', 30))
+    line['status'] = 'linked'
+    line['linked'] = visual
+    state.setdefault('guided', {})['narration'] = result['narration']
+    updated = save(ident, body.revision, state, current['name'])
+    result.update(revision=updated['revision'], signature=updated['signature'], render_signature=updated['render_signature'], files=[],
+                  after_seconds=updated['duration'], notice='확인한 장면에 나레이션을 연결했습니다.' + (' ' + ' '.join(warnings) if warnings else ''))
+    payload['render_state'] = updated['state']
+    with db.connection() as conn:
+        conn.execute('UPDATE jobs SET payload=?,result=?,updated=? WHERE id=?',
+                     (json.dumps(payload, ensure_ascii=False), json.dumps(result, ensure_ascii=False), time.time(), job_id))
+    return updated
 
 
 @app.post('/api/projects/{ident}/auto-cut')
@@ -552,7 +651,7 @@ def auto_cut(ident: str, body: AutoCut):
         revision = conn.execute('SELECT revision FROM projects WHERE id=?', (ident,)).fetchone()['revision']
         if revision != body.revision:
             raise HTTPException(409, '편집이 변경되었어요. 최신 편집을 불러온 뒤 다시 실행해 주세요.')
-        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit') AND status IN ('queued','running')", (ident,)).fetchone():
+        if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit','guided_edit') AND status IN ('queued','running')", (ident,)).fetchone():
             raise HTTPException(409, '무음 자동 편집이 진행 중이에요. 결과를 기다려 주세요.')
         job_id = db.uid()
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
@@ -568,7 +667,7 @@ class UndoAutoCut(BaseModel):
 def undo_auto_cut(ident: str, job_id: str, body: UndoAutoCut):
     current = project(ident)
     with db.connection() as conn:
-        row = conn.execute("SELECT payload,result FROM jobs WHERE id=? AND project_id=? AND kind IN ('auto_cut','script_edit')", (job_id, ident)).fetchone()
+        row = conn.execute("SELECT payload,result FROM jobs WHERE id=? AND project_id=? AND kind IN ('auto_cut','script_edit','guided_edit')", (job_id, ident)).fetchone()
     if not row:
         raise HTTPException(404, '자동 편집 작업을 찾지 못했어요.')
     payload, result = json.loads(row['payload']), json.loads(row['result'])

@@ -15,7 +15,7 @@ from filelock import FileLock
 
 
 def ensure_model(name=MODEL_NAME):
-    if name not in ['tiny', 'base', 'small', 'medium']:
+    if name not in ['tiny', 'base', 'small', 'medium', 'large-v3']:
         raise ValueError('지원하지 않는 인식 모델입니다.')
     target = DATA / 'models' / f'whisper-{name}'
     with FileLock(DATA / 'models' / f'.{name}.lock'):
@@ -34,7 +34,7 @@ def ensure_model(name=MODEL_NAME):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', default=MODEL_NAME, choices=['tiny', 'base', 'small', 'medium'])
+    parser.add_argument('--model', default=MODEL_NAME, choices=['tiny', 'base', 'small', 'medium', 'large-v3'])
     args = parser.parse_args()
     ensure_model(args.model)
     print(f'Local Whisper {args.model} model ready. Select with STUDIO_WHISPER_MODEL; restart to change models.')
