@@ -56,8 +56,10 @@ def handler_for(route):
         data = {'job_id': 'j2'}
     if req.method == 'POST' and path.endswith('/narration'):
         data = PROJECT
-    if req.method == 'PUT':
+    if req.method in ('PUT', 'PATCH'):
         data = PROJECT
+    if req.method == 'DELETE':
+        data = {'ok': True}
     route.fulfill(status=200 if data is not None else 404, content_type='application/json', body=json.dumps(data if data is not None else {'detail': 'none'}))
 
 
@@ -108,6 +110,23 @@ def main(shot):
         page.click('[data-g-restore="0"]')
         page.wait_for_timeout(500)
         assert sum(1 for m, *_ in requests if m == 'PUT') > before
+        # 프로젝트·원본 수정/삭제 버튼
+        page.once('dialog', lambda d: d.accept('새 이름.mp4'))
+        page.click('[data-rename-asset="v2"]')
+        page.wait_for_timeout(300)
+        assert any(m == 'PATCH' and b == {'name': '새 이름.mp4'} for m, pth, b in requests)
+        page.once('dialog', lambda d: d.dismiss())   # 취소하면 삭제 요청이 가지 않는다
+        page.click('[data-delete-asset="v2"]')
+        page.wait_for_timeout(300)
+        assert not any(m == 'DELETE' and 'assets/v2' in pth for m, pth, b in requests)
+        page.once('dialog', lambda d: d.accept())
+        page.click('[data-delete-asset="v2"]')
+        page.wait_for_timeout(300)
+        assert any(m == 'DELETE' and pth.endswith('/assets/v2') for m, pth, b in requests)
+        page.once('dialog', lambda d: d.accept())
+        page.click('#delete-project')
+        page.wait_for_timeout(300)
+        assert any(m == 'DELETE' and pth == '/projects/p1' for m, pth, b in requests)
         # 고급 메뉴로 접힌 기존 대본 매칭이 남아 있음
         assert page.locator('details:has(#edit-script) > summary').inner_text().startswith('고급')
         overflow = page.evaluate('document.documentElement.scrollWidth - window.innerWidth')

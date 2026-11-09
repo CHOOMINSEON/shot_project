@@ -220,6 +220,79 @@ def edit_project(ident: str, body: Edit):
     return save(ident, body.revision, body.state, body.name)
 
 
+def busy_jobs(conn, ident):
+    return conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('queued','running')", (ident,)).fetchone()
+
+
+@app.delete('/api/projects/{ident}')
+def delete_project(ident: str):
+    """프로젝트와 올린 원본·출력물·참고 이미지를 모두 삭제한다. 진행 중인 작업이 있으면 거부."""
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if not conn.execute('SELECT 1 FROM projects WHERE id=?', (ident,)).fetchone():
+            raise HTTPException(404, '프로젝트를 찾을 수 없습니다.')
+        if busy_jobs(conn, ident):
+            raise HTTPException(409, '진행 중인 작업이 있어요. 끝나거나 취소한 뒤 삭제해 주세요.')
+        assets = [r['id'] for r in conn.execute('SELECT id FROM assets WHERE project_id=?', (ident,))]
+        refs = [r['id'] for r in conn.execute('SELECT id FROM product_references WHERE project_id=?', (ident,))]
+        jobs = [r['id'] for r in conn.execute('SELECT id FROM jobs WHERE project_id=?', (ident,))]
+        for asset_id in assets:
+            conn.execute('DELETE FROM chunks WHERE asset_id=?', (asset_id,))
+        conn.execute('DELETE FROM assets WHERE project_id=?', (ident,))
+        conn.execute('DELETE FROM product_references WHERE project_id=?', (ident,))
+        conn.execute('DELETE FROM jobs WHERE project_id=?', (ident,))
+        conn.execute('DELETE FROM projects WHERE id=?', (ident,))
+    for asset_id in assets:
+        shutil.rmtree(DATA / 'assets' / asset_id, ignore_errors=True)
+    for ref in refs:
+        shutil.rmtree(DATA / 'references' / ref, ignore_errors=True)
+    for job_id in jobs:
+        shutil.rmtree(DATA / 'exports' / job_id, ignore_errors=True)
+        shutil.rmtree(DATA / 'work' / job_id, ignore_errors=True)
+    return {'ok': True}
+
+
+class AssetName(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+@app.patch('/api/projects/{ident}/assets/{asset_id}')
+def rename_asset(ident: str, asset_id: str, body: AssetName):
+    with db.connection() as conn:
+        row = conn.execute('SELECT 1 FROM assets WHERE id=? AND project_id=?', (asset_id, ident)).fetchone()
+        if not row:
+            raise HTTPException(404, '원본을 찾을 수 없습니다.')
+        conn.execute('UPDATE assets SET name=? WHERE id=?', (body.name.strip(), asset_id))
+    return project(ident)
+
+
+@app.delete('/api/projects/{ident}/assets/{asset_id}')
+def delete_asset(ident: str, asset_id: str):
+    """원본 영상 삭제. 이 원본을 쓰는 컷·자막·제품 연결도 함께 정리하고, 편집 버전을 올린다."""
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT state FROM projects WHERE id=?', (ident,)).fetchone()
+        if not row or not conn.execute('SELECT 1 FROM assets WHERE id=? AND project_id=?', (asset_id, ident)).fetchone():
+            raise HTTPException(404, '원본을 찾을 수 없습니다.')
+        if busy_jobs(conn, ident):
+            raise HTTPException(409, '진행 중인 작업이 있어요. 끝나거나 취소한 뒤 삭제해 주세요.')
+        state = json.loads(row['state'])
+        before = len(state.get('clips', []))
+        state['clips'] = [c for c in state.get('clips', []) if asset_id not in (c.get('asset_id'), c.get('visual_asset_id'))]
+        removed = before - len(state['clips'])
+        if removed:  # 컷이 바뀌면 이전 자막·자동 편집 결과는 더 이상 맞지 않는다.
+            state['captions'] = {'items': []}
+            for key in ['guided', 'guided_brief', 'script_edit', 'script_brief']:
+                state.pop(key, None)
+        state['protections'] = [p for p in state.get('protections', []) if p.get('asset_id') != asset_id]
+        conn.execute('DELETE FROM chunks WHERE asset_id=?', (asset_id,))
+        conn.execute('DELETE FROM assets WHERE id=?', (asset_id,))
+        conn.execute('UPDATE projects SET state=?,revision=revision+1,updated=? WHERE id=?',
+                     (json.dumps(state, ensure_ascii=False), time.time(), ident))
+    shutil.rmtree(DATA / 'assets' / asset_id, ignore_errors=True)
+    return {'ok': True, 'removed_clips': removed}
+
+
 class Upload(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     size: StrictInt = Field(gt=0, le=MAX_FILE_BYTES)
