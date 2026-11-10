@@ -74,9 +74,12 @@ def main():
         # 1) 구간 선택 후 재생 위치(25초)에서 자르기: 두 번째 구간(20~30)이 20~25, 25~30으로 나뉨
         page.click('[data-clip="1"] ', position={'x': 12, 'y': 8})
         page.evaluate("window.__t = 25")
-        page.keyboard.press('s')
+        page.keyboard.press('e')
         settle()
         assert [(c['start'], c['end']) for c in state['clips']] == [(0, 10), (20, 25), (25, 30), (40, 50)], state['clips']
+        page.keyboard.press('s')   # 예전 단축키 S는 더 이상 자르기가 아니다
+        settle()
+        assert len(state['clips']) == 4
         # 2) 되돌리기(Ctrl+Z)
         page.keyboard.press('Control+z')
         settle()
@@ -94,7 +97,7 @@ def main():
         # 4) 범위 밖 재생 위치에서는 자르지 않고 오류를 안내
         before = len(puts)
         page.evaluate("window.__t = 5")
-        page.keyboard.press('s')
+        page.keyboard.press('e')
         settle()
         assert len(puts) == before and '구간 안' in page.text_content('#toast')
         # 5) 끌어서 순서 변경: 첫 구간을 맨 뒤로
@@ -120,10 +123,28 @@ def main():
         page.keyboard.press('Delete')
         settle()
         assert len(state['clips']) == 1, ids()
+        # 7-2) 복사·붙여넣기(Ctrl+C / Ctrl+V): 남은 한 구간을 복사해 뒤에 붙임
+        page.click('[data-clip="0"]', position={'x': 12, 'y': 8})
+        page.keyboard.press('Control+c')
+        page.keyboard.press('Control+v')
+        settle()
+        assert len(state['clips']) == 2 and state['clips'][0]['id'] != state['clips'][1]['id'] and state['clips'][0]['start'] == state['clips'][1]['start']
+        # 7-3) 자동 저장: 구간 이름을 고치면 저장 버튼 없이 저장
+        before = len(puts)
+        page.click('[data-clip="1"]', position={'x': 12, 'y': 8})
+        page.fill('#clip-label', '자동저장 확인')
+        page.wait_for_timeout(1600)
+        assert len(puts) > before and state['clips'][1]['label'] == '자동저장 확인', state['clips'][1]
+        # 7-4) 잘못된 경계값은 저장하지 않는다
+        before = len(puts)
+        page.fill('#clip-end', '0')
+        page.wait_for_timeout(1500)
+        assert len(puts) == before
         # 8) 입력창에서는 단축키가 동작하지 않는다
         before = len(puts)
         page.fill('#project-name', 'sdq')
-        assert len(puts) == before
+        page.keyboard.press('Control+v')
+        assert len(puts) == before   # 단축키로 해석되지 않았고, 자동 저장은 1초 뒤
         browser.close()
     server.shutdown()
     print('편집 화면 점검 통과 · JS 오류', len(errors), errors[:3])
