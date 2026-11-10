@@ -86,7 +86,11 @@ action('guided-start',async()=>{
   await poll();}
  finally{guidedStarting=false;drawGuided();}
 });
-bind('guided-style','change',drawGuided);
+bind('guided-style','change',()=>{
+ // 사용자가 고치지 않은 기본 지침이면 유형에 맞는 기본 지침으로 바꿔 준다(직접 쓴 지침은 건드리지 않음).
+ const map=guidedDefaults?.guidelines||{},texts=Object.values(map),cur=$('guided-text').value.trim();
+ if(!cur||texts.some(t=>t.trim()===cur)){$('guided-text').value=$('guided-style').value==='commentary'?map.commentary:map.default;}
+ drawGuided();});
 action('guided-play',()=>{
  const r=latestGuided?.result,video=r?.files?.find(f=>f.type==='video');
  if(video&&r.render_signature===project.render_signature){rendered=latestGuided.id;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(video.name)+'?inline=true',0,true);$('preview-label').textContent='지침 자동 편집 추천본 · 미리보기 화질';}

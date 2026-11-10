@@ -611,14 +611,14 @@ def edit_script(ident: str, body: ScriptEdit, request: Request):
 
 @app.get('/api/guided/defaults')
 def guided_defaults():
-    return {'guideline': guided.DEFAULT_GUIDELINE, 'styles': [{'key': k, 'name': v['name'], 'note': v['note'], 'target': list(v['target']),
+    return {'guideline': guided.DEFAULT_GUIDELINE, 'guidelines': guided.GUIDELINES, 'styles': [{'key': k, 'name': v['name'], 'note': v['note'], 'target': list(v['target']),
                                            'narration': v['narration']} for k, v in guided.STYLES.items()]}
 
 
 class GuidedEdit(BaseModel):
     revision: StrictInt
     guideline: str = Field(default='', max_length=6000)
-    style: str = Field(default='auto', pattern='^(auto|oneshot|cook_mukbang|recipe|vlog|restaurant)$')
+    style: str = Field(default='auto', pattern='^(auto|oneshot|cook_mukbang|recipe|vlog|restaurant|commentary)$')
     frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
 

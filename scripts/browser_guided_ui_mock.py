@@ -85,7 +85,7 @@ def main(shot):
         page.goto(base)
         page.wait_for_selector('#guided-report .script-row', timeout=10000)
         assert page.input_value('#guided-text').startswith('업로드한 음식 리뷰 영상'), '기본 지침이 보여야 함'
-        assert page.locator('#guided-style option').count() == 6
+        assert page.locator('#guided-style option').count() == 7
         assert page.locator('#guided-report .script-row.matched, #guided-report .script-row.missing').count() >= 8
         text = page.text_content('#guided-report')
         for expected in ['말실수 재시도', '반복 설명', '촬영 준비·대기', '장면 선택 필요', '찾지 못한 항목']:

@@ -315,3 +315,14 @@ def test_different_numbers_not_treated_as_retake():
     words = tokens([w(1, ' 가격은 2500원이에요.', 0, 2), w(2, ' 가격은 3500원이에요.', 4, 6)])
     sentences = guided.mark_redundant(guided.split_sentences(words, 10))
     assert not any(s['drop'] for s in sentences)
+
+
+def test_commentary_style_and_viewer_question():
+    assert 'commentary' in guided.STYLES and guided.GUIDELINES['commentary'] != guided.GUIDELINES['default']
+    rules = guided.parse_guideline(guided.GUIDELINES['commentary'], 'commentary')
+    assert rules['target'] == (45, 60) or rules['target']
+    ask = guided.classify('여러분은 가오나시를 어떻게 보셨나요?')
+    assert 'conclusion' in ask['labels'] and 'question' in ask['labels']
+    assert 'conclusion' not in guided.classify('댓글로 요청받은 과자 먹어봤습니다')['labels']
+    why = guided.classify('가오나시는 왜 치히로에게 금을 줬을까요?')
+    assert 'question' in why['labels']
