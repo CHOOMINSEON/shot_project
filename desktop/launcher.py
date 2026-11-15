@@ -17,6 +17,12 @@ def configure():
     os.environ.setdefault('STUDIO_DATA_DIR', str(home_data))
     os.environ.setdefault('STUDIO_WHISPER_MODEL', 'medium')
     os.environ['PATH'] = str(bundle / 'ffmpeg' / 'bin') + os.pathsep + os.environ.get('PATH', '')
+    # 선택 설치: GPU 팩(CUDA 12 / cuDNN 9 DLL)을 실행 파일 옆 gpu 폴더에 풀어 두면 NVIDIA 그래픽카드로 음성 인식을 가속한다.
+    gpu = Path(sys.executable).resolve().parent / 'gpu'
+    if gpu.is_dir():
+        os.environ['PATH'] = str(gpu) + os.pathsep + os.environ.get('PATH', '')
+        if hasattr(os, 'add_dll_directory'):
+            os.add_dll_directory(str(gpu))
     os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
     os.environ.setdefault('HF_HOME', str(Path(os.environ['STUDIO_DATA_DIR']) / 'huggingface'))
     for stream in [sys.stdout, sys.stderr]:

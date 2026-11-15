@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 from filelock import FileLock
-from .settings import DATA
+from .settings import DATA, VISION_THREADS
 
 DIRECTORY = DATA / 'models' / 'scene-search-v1'
 CLIP_REV = 'd15189d7028b43f1d3e65039190477f6af591c2a'
@@ -64,7 +64,7 @@ class Vision:
         import onnxruntime as ort
         from tokenizers import Tokenizer
         from rapidocr_onnxruntime import RapidOCR
-        options=ort.SessionOptions();options.intra_op_num_threads=2;options.inter_op_num_threads=1
+        options=ort.SessionOptions();options.intra_op_num_threads=VISION_THREADS;options.inter_op_num_threads=1
         providers=['CPUExecutionProvider']
         if os.getenv('STUDIO_DEVICE','auto').lower()!='cpu' and 'CUDAExecutionProvider' in ort.get_available_providers():
             providers=['CUDAExecutionProvider','CPUExecutionProvider']  # onnxruntime-gpu가 설치된 경우에만
@@ -76,7 +76,7 @@ class Vision:
         self.tokenizer.enable_padding(length=77,pad_id=49407,pad_token='<|endoftext|>')
         self.ocr=RapidOCR(det_model_path=str(DIRECTORY/'det.onnx'),rec_model_path=str(DIRECTORY/'rec.onnx'),
                           rec_keys_path=str(DIRECTORY/'dict.txt'),rec_img_shape=[3,48,320],
-                          intra_op_num_threads=2,inter_op_num_threads=1,use_cls=False)
+                          intra_op_num_threads=VISION_THREADS,inter_op_num_threads=1,use_cls=False)
         self.cache={}
 
     def texts(self,texts):

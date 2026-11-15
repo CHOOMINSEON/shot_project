@@ -1,14 +1,17 @@
 """Timestamped video-only scene index; silent frames remain searchable."""
+import copy
 import hashlib
 import json
 import sqlite3
+import time as _clock
 from pathlib import Path
 
 import numpy as np
-from .settings import DATA
+from .settings import CORES, DATA
 from . import scene_models
 
 VERSION = 'scene-v1-clip32-koreanocr12'
+OCR_MAX_SIDE = 1024   # 글자 인식 입력 한 변의 최대 크기(전엔 1536). 포장지 큰 글자는 충분히 읽힘
 # These English prompts are the actual inputs to the local visual/text encoder.
 PROMPTS = {
  'packaging': 'a photograph of packaged food with a printed brand label',
@@ -91,12 +94,13 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
         shot=last['shot'] if last else 0
         conn.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('fingerprint',json.dumps(stamp)));conn.commit()
         previous=None;last_scan=-1;last_sample=resume;dense_until=-1;last_ocr='';last_tag=''
+        ocr_cache=None  # (시간, 전체 화면 임베딩, OCR 결과, OCR 이미지 크기): 같은 장면에서는 글자 인식을 다시 하지 않는다
         previous_id=conn.execute('SELECT id FROM frames ORDER BY start DESC LIMIT 1').fetchone()
         previous_id=previous_id['id'] if previous_id else None
-        observed_end=0
+        observed_end=0;begun=_clock.monotonic();begun_at=max(0,resume);pending=0
         source=DATA/'assets'/asset['id']/'original'
         with av.open(str(source),options={'protocol_whitelist':'file,pipe'}) as container:
-            stream=container.streams.video[0];stream.codec_context.thread_count=2
+            stream=container.streams.video[0];stream.thread_type='AUTO';stream.codec_context.thread_count=min(8,max(2,CORES))
             origin=float((stream.start_time or 0)*stream.time_base)
             if resume>0:container.seek(int(max(0,resume-.5+origin)/float(stream.time_base)),stream=stream)
             for frame in container.decode(stream):
@@ -136,22 +140,27 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                     cutoff=.285 if key in ['cream','reaction','empty_space','size_compare'] else .275 if key=='crosssection' else .26
                     if key=='cream' and (raw[key]<.285 or raw[key]-raw['plain_bread']<.02):continue
                     if raw[key]>=cutoff and raw[key]-negative>=(.015 if key=='cream' else .04):tags[key]=round(raw[key],4)
-                ocr=model.read(image)[:20]
-                package_vector=model.texts([PROMPTS['packaging'],PROMPTS['no_food_screen']])
-                for item in ocr:
-                    points=np.asarray(item['box']);x0,y0=points.min(axis=0);x1,y1=points.max(axis=0)
-                    padx=max(32,(x1-x0)*.6);pady=max(32,(y1-y0)*1.5)
-                    crop=image.crop((max(0,int(x0-padx)),max(0,int(y0-pady)),min(image.width,int(x1+padx)),min(image.height,int(y1+pady))))
-                    local_scores=package_vector@model.image(crop)
-                    item['package_region']=bool(local_scores[0]>=.25 and local_scores[0]-local_scores[1]>=.02)
-                    item['package_similarity']=round(float(local_scores[0]),4)
+                full_view=options[0][1]
+                if (ocr_cache and not cut and time-ocr_cache[0]<5. and float(full_view@ocr_cache[1])>=.985):
+                    ocr=copy.deepcopy(ocr_cache[2]);ocr_size=list(ocr_cache[3])   # 거의 같은 화면: 직전 글자 인식 결과 재사용
+                else:
+                    ocr_image=image.copy();ocr_image.thumbnail((OCR_MAX_SIDE,OCR_MAX_SIDE),Image.Resampling.LANCZOS)
+                    ocr=model.read(ocr_image)[:12]
+                    package_vector=model.texts([PROMPTS['packaging'],PROMPTS['no_food_screen']])
+                    for item in ocr:
+                        points=np.asarray(item['box']);x0,y0=points.min(axis=0);x1,y1=points.max(axis=0)
+                        padx=max(32,(x1-x0)*.6);pady=max(32,(y1-y0)*1.5)
+                        crop=ocr_image.crop((max(0,int(x0-padx)),max(0,int(y0-pady)),min(ocr_image.width,int(x1+padx)),min(ocr_image.height,int(y1+pady))))
+                        local_scores=package_vector@model.image(crop)
+                        item['package_region']=bool(local_scores[0]>=.25 and local_scores[0]-local_scores[1]>=.02)
+                        item['package_similarity']=round(float(local_scores[0]),4)
+                    ocr_size=list(ocr_image.size);ocr_cache=(time,full_view,copy.deepcopy(ocr),ocr_size)
                 ocr_text=' '.join(r['text'] for r in ocr)
                 top=max(tags,key=tags.get) if tags else ''
                 if (ocr_text and ocr_text!=last_ocr) or top in ['crosssection','cream','eating','opening'] and top!=last_tag:
                     dense_until=time+2
                 last_ocr=ocr_text;last_tag=top
                 ident=f'{round(time*1000000):012d}'
-                ocr_size=list(image.size)
                 image.thumbnail((360,360),Image.Resampling.LANCZOS);image.save(folder/(ident+'.jpg'),quality=78)
                 linked=[w for w in asset['analysis'].get('words',[]) if w['start']<time+2 and w['end']>time-.5]
                 row={'asset_id':asset['id'],'filename':asset['name'],'frame_time':time,'ocr':ocr,
@@ -161,13 +170,19 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                      'thumbnail':ident+'.jpg','scene_cut':cut}
                 if previous_id:conn.execute('UPDATE frames SET end=? WHERE id=?',(time,previous_id))
                 conn.execute('INSERT OR REPLACE INTO frames VALUES (?,?,?,?,?,?)',(ident,time,min(length,observed_end),shot,json.dumps(row,ensure_ascii=False),vector.astype('<f2').tobytes()))
-                conn.commit();previous_id=ident;last_sample=time
-                progress(min(.99,time/length),f'{asset["name"]} · {int(time)}/{int(length)}초 · 무음 포함 프레임·한국어 OCR 분석')
+                pending+=1
+                if pending>=10:conn.commit();pending=0   # 프레임마다 디스크에 쓰지 않고 10개씩(중단되면 마지막 몇 장만 다시 분석)
+                previous_id=ident;last_sample=time
+                done=max(.001,time-begun_at);elapsed=_clock.monotonic()-begun;left=max(0,(length-time)*elapsed/done)
+                progress(min(.99,time/length),f'{asset["name"]} · {int(time)}/{int(length)}초 · 장면·글자 분석 · 남은 시간 약 {int(left//60)}분')
         if previous_id:conn.execute('UPDATE frames SET end=? WHERE id=?',(min(length,observed_end or length),previous_id))
-        flag_overlays(conn)
+        conn.commit();flag_overlays(conn)
         conn.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('complete','true'));conn.commit()
         return {'count':conn.execute('SELECT COUNT(*) FROM frames').fetchone()[0],'version':VERSION,'complete':True}
-    finally:conn.close()
+    finally:
+        try:conn.commit()
+        except sqlite3.Error:pass
+        conn.close()
 
 
 def protected(asset_id):

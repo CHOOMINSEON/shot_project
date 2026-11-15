@@ -14,7 +14,7 @@ import numpy as np
 
 from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
 from .media import Cancelled, probe, render_piece, run_ffmpeg
-from .settings import DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
+from .settings import ASR_BEAM, ASR_THREADS, DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
 STOP = threading.Event()
 MODEL = None
@@ -70,7 +70,7 @@ def _open_model(factory, directory):
         except Exception:
             pass  # CUDA 라이브러리 누락 등 → CPU
     MODEL_DEVICE = 'cpu'
-    return factory(str(directory), device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)
+    return factory(str(directory), device='cpu', compute_type='int8', cpu_threads=ASR_THREADS, num_workers=1)
 
 
 def load_model(name=None):
@@ -156,7 +156,7 @@ def analyze(ident, payload):
             data['peaks'].append(round(float(np.max(np.abs(chunk))) if len(chunk) else 0., 3))
         if model:
             prompt = (KOREAN_CONTEXT + ' ' + payload.get('vocabulary', ''))[:1000].strip()
-            segments, _ = model.transcribe(audio, language='ko', word_timestamps=True, beam_size=5,
+            segments, _ = model.transcribe(audio, language='ko', word_timestamps=True, beam_size=ASR_BEAM,
                                           vad_filter=True, initial_prompt=prompt,
                                           hotwords=payload.get('vocabulary', '')[:1000],
                                           condition_on_previous_text=False, hallucination_silence_threshold=1.)
