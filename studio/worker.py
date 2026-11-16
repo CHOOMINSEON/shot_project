@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
-from .media import Cancelled, probe, render_piece, run_ffmpeg
+from .media import Cancelled, probe, render_piece, run_ffmpeg, speed_up
 from .settings import ASR_BEAM, ASR_THREADS, DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
 STOP = threading.Event()
@@ -206,6 +206,7 @@ def render(ident, payload):
     work.mkdir(exist_ok=True)
     target.mkdir(exist_ok=True)
     total = timeline.duration(state['clips'])
+    speed = 1. if preview else timeline.output_speed(state)   # 미리보기는 타임라인과 맞도록 원래 속도
     estimate = total * (4_000_000 if not preview else 500_000) * (3 if not preview else 2) + 512 * 1024 * 1024
     if shutil.disk_usage(DATA).free < estimate:
         raise ValueError('대기 중 서버 저장 공간이 줄었습니다. 출력 파일을 정리하거나 저장 공간을 늘린 뒤 재시도해 주세요.')
@@ -249,17 +250,20 @@ def render(ident, payload):
         rendered_info = probe(output)
         if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
             raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')
+        if speed != 1:
+            update(ident, payload.get('progress_offset', 0) + payload.get('progress_scale', 1) * .9, f'{speed:g}배속 적용 중')
+            speed_up(output, speed, work, lambda: is_cancelled(ident), state.get('quality', 'standard'))
         file_list.append({'name': output.name, 'size': output.stat().st_size, 'label': label, 'type': 'video'})
         group_ranges.append({'file': output.name, 'start': group_start, 'end': elapsed, 'label': label})
         if not preview:
             local = timeline.local_captions(items, group_start, elapsed)
             if local or len(groups) == 1:
                 subtitle = target / f'{prefix}.srt'
-                subtitle.write_text(timeline.srt(local, elapsed - group_start), encoding='utf-8')
+                subtitle.write_text(timeline.srt(timeline.scale_captions(local, speed), (elapsed - group_start) / speed), encoding='utf-8')
                 file_list.append({'name': subtitle.name, 'size': subtitle.stat().st_size, 'label': label, 'type': 'subtitle'})
     if not preview:
         manifest = {'revision': payload['revision'], 'timeline_signature': timeline.signature(state), 'mode': payload['mode'],
-                    'clips': edit_list, 'notice': '캡컷 프로젝트 파일이 아닌 참고·복원용 편집 목록입니다.'}
+                    'clips': edit_list, 'speed': speed, 'notice': '캡컷 프로젝트 파일이 아닌 참고·복원용 편집 목록입니다.'}
         # 컷 경계를 다른 편집기로 옮기기 위한 보조 파일(캡컷 직접 가져오기는 미검증 → exports.py 설명 참고)
         for name, content in exports.package(edit_list, group_ranges, state.get('fps', 30), base).items():
             (target / name).write_text(content, encoding='utf-8')
@@ -268,7 +272,7 @@ def render(ident, payload):
         file_list.append({'name': 'edit-list.json', 'size': (target / 'edit-list.json').stat().st_size, 'type': 'manifest'})
         if len(groups) > 1 and items:
             combined = target / f'{base}_전체연결용.srt'
-            combined.write_text(timeline.srt(items, total), encoding='utf-8')
+            combined.write_text(timeline.srt(timeline.scale_captions(items, speed), total / speed), encoding='utf-8')
             file_list.append({'name': combined.name, 'size': combined.stat().st_size, 'type': 'subtitle'})
         update(ident, .93, 'MP4·SRT·편집 목록 ZIP 생성 중')
         archive = target / f'{base}.zip'
@@ -281,7 +285,7 @@ def render(ident, payload):
                         destination.write(chunk)
         file_list.append({'name': archive.name, 'size': archive.stat().st_size, 'type': 'archive'})
     return {'files': file_list, 'revision': payload['revision'], 'signature': timeline.signature(state),
-            'render_signature': timeline.render_signature(state), 'preview': preview}
+            'render_signature': timeline.render_signature(state), 'preview': preview, 'speed': speed}
 
 
 def auto_cut(ident, payload):
@@ -511,6 +515,14 @@ def guided_edit(ident, payload):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
         stage_log(ident, '제품 근거 계산 끝')
+        # 배속: 화면에서 고른 값(지침에 'N배속'이 있으면 그 값). 목표 길이는 배속 후 기준이므로 원본 기준으로는 그만큼 더 담는다.
+        speed = float(payload.get('speed') or 1)
+        if (m := re.search(r'(\d(?:\.\d+)?)\s*배속', payload['guideline'])) and 1 <= float(m[1]) <= 2:
+            speed = float(m[1])
+        speed = min(2., max(1., speed))
+        if speed != 1:
+            rules['target'] = (rules['target'][0] * speed, rules['target'][1] * speed)
+            rules['applied'].append(f'최종 출력 {speed:g}배속(목표 길이는 배속 후 기준)')
         update(ident, .5, '지침에 따라 구간 선택·구성')
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
         lines = []
@@ -530,7 +542,7 @@ def guided_edit(ident, payload):
         if not planned['clips']:
             return {'applied': False, **report, 'files': [], 'preview': True, 'notice': '선택할 구간을 찾지 못해 기존 편집을 유지했어요.'}
         check_cancel(ident)
-        state = {**before, 'clips': planned['clips'], 'cut_removals': [], 'guided': report,
+        state = {**before, 'clips': planned['clips'], 'cut_removals': [], 'guided': report, 'speed': speed,
                  'guided_brief': {'guideline': payload['guideline'], 'style': style}}
         state.pop('script_edit', None)
         state.pop('script_brief', None)

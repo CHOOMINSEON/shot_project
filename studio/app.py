@@ -686,6 +686,7 @@ class GuidedEdit(BaseModel):
     frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
     fast: bool = True  # 키프레임만 보고 글자 인식(OCR)을 생략하는 빠른 화면 분석
+    speed: float = Field(default=1.4, ge=1, le=2)  # 최종 출력 배속(완성본 1116 실측 1.4배)
 
 
 @app.post('/api/projects/{ident}/guided-edit')
@@ -927,7 +928,8 @@ def download_srt(ident: str):
     if captions.get('signature') != current['signature']:
         raise HTTPException(409, '자막 동기화가 필요합니다. 최신 편집본 기준으로 다시 생성해 주세요.')
     proofreading.require_review(captions.get('items', []))
-    return Response(timeline.srt(captions.get('items', []), current['duration']), media_type='application/x-subrip; charset=utf-8',
+    speed = timeline.output_speed(current['state'])
+    return Response(timeline.srt(timeline.scale_captions(captions.get('items', []), speed), current['duration'] / speed), media_type='application/x-subrip; charset=utf-8',
                     headers={'Content-Disposition': 'attachment; filename="iyoring_review_roughcut.srt"'})
 
 

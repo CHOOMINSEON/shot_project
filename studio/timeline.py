@@ -78,6 +78,8 @@ def signature(state):
 
 def render_signature(state):
     content = [state.get('clips', []), state.get('fps', 30), state.get('quality', 'standard')]
+    if output_speed(state) != 1:
+        content.append(output_speed(state))   # 배속이 바뀌면 이전 출력은 재사용하지 않는다
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
@@ -293,6 +295,19 @@ def srt(items, length):
     items = sorted([c for c in items if c['text'].strip()], key=lambda c: c['start'])
     validate_captions(items, length)
     return ''.join(f"{i}\n{timecode(c['start'])} --> {timecode(c['end'])}\n{c['text'].strip()}\n\n" for i, c in enumerate(items, 1))
+
+
+def output_speed(state):
+    """최종 출력 배속(1 = 그대로). 타임라인·미리보기는 원래 속도로 두고 최종 MP4·SRT에만 적용한다."""
+    try:
+        value = float(state.get('speed', 1) or 1)
+    except (TypeError, ValueError):
+        return 1.
+    return value if 1 < value <= 2 else 1.
+
+
+def scale_captions(items, speed):
+    return [{**c, 'start': c['start'] / speed, 'end': c['end'] / speed} for c in items] if speed != 1 else items
 
 
 def local_captions(items, start, end):

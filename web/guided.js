@@ -82,7 +82,7 @@ action('guided-start',async()=>{
  const guideline=$('guided-text').value.trim(),style=$('guided-style').value,frame=$('guided-frame').value;
  guidedStarting=true;drawGuided();
  try{await mutate(s=>{s.guided_brief={guideline,style};});
-  await api('/projects/'+project.id+'/guided-edit',{method:'POST',body:JSON.stringify({revision:project.revision,guideline,style,frame,audio_source_ids:[...guidedAudioSrc],fast:$('guided-fast').checked})});
+  await api('/projects/'+project.id+'/guided-edit',{method:'POST',body:JSON.stringify({revision:project.revision,guideline,style,frame,audio_source_ids:[...guidedAudioSrc],fast:$('guided-fast').checked,speed:Number($('guided-speed').value)})});
   await poll();}
  finally{guidedStarting=false;drawGuided();}
 });

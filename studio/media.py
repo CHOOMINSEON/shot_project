@@ -160,3 +160,30 @@ def render_piece(source, clip, metadata, output, work, fps, quality, preview, ca
              '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-threads', str(THREADS),
              '-map_metadata', '-1', '-movflags', '+faststart', output]
     run_ffmpeg(args, work, cancelled, progress, length)
+
+
+def atempo_chain(speed):
+    """atempo는 한 번에 0.5~2배만 가능하므로 범위를 넘으면 나눠서 건다."""
+    parts, rest = [], float(speed)
+    while rest > 2.0:
+        parts.append('atempo=2.0')
+        rest /= 2.0
+    parts.append(f'atempo={rest:.6f}')
+    return ','.join(parts)
+
+
+def speed_up(path, speed, work, cancelled=lambda: False, quality='standard'):
+    """완성된 MP4 전체에 배속을 건다(목소리 높낮이는 유지). 결과 길이 = 원래 길이 / 배속."""
+    path = Path(path)
+    info = probe(path)
+    sped = path.with_name(path.stem + '.speed.mp4')
+    graph = f'[0:v]setpts=PTS/{speed:.6f}[v]'
+    maps = ['-map', '[v]']
+    if info.get('has_audio'):
+        graph += f';[0:a]{atempo_chain(speed)}[a]'
+        maps += ['-map', '[a]', '-c:a', 'aac', '-b:a', '192k']
+    run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-i', path, '-filter_complex', graph, *maps,
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18' if quality == 'high' else '20', '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart', sped], work, cancelled)
+    sped.replace(path)
+    return probe(path)

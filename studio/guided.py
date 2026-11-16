@@ -129,7 +129,10 @@ STYLES = {
 # 2026-11 완성본 1116(GS25 신상 5종, 69.4초) 실측: 컷 52개(분당 약 45컷, 평균 1.3초), 후킹 4초 안에 전체샷·포장·한입·단면 4컷,
 # 제품별 블록 8~15초(포장 들어 보이기 → 고른 이유 → 개봉·단면 → 한입 → 짧은 반응 여러 개 → 가격 불만 → "N점 드릴게요"),
 # 마지막 3초에 1위 제품과 댓글 질문. 대본의 [실제 반응] 자리는 대본에 없는 즉흥 발화로 채워져 있다.
-CHANNEL_STYLE = {'multi_product': {'hook_seconds': 4, 'hook_shots': 4, 'block_seconds': (8, 15), 'block_end': 'score',
+# 원본(35분 28초)과 소리 대조로 확인한 값: 전체 1.4배속, 원본에서 쓴 분량 90초(4.2%), 소리 컷 60개(원본 기준 중앙값 1.3초),
+# 첫 4초 후킹은 촬영 맨 앞(70초·113초 지점)에서 가져오고 그 뒤는 전부 촬영 순서 그대로. 한 제품에서 여러 번 말한 구간(예: 86초 분량)에서 11초만 남김.
+CHANNEL_STYLE = {'multi_product': {'speed': 1.4, 'source_kept_ratio': 0.042, 'audio_cuts': 60, 'median_source_cut': 1.33, 'order': 'chronological',
+                                   'hook_seconds': 4, 'hook_shots': 4, 'block_seconds': (8, 15), 'block_end': 'score',
                                    'outro_seconds': 3, 'total_seconds': 69, 'cuts': 52},
                  'median_cut': 0.9, 'cuts_per_minute': (46, 66), 'loudness_lufs': (-10.4, -8.1),
                  'caption': {'position': 'center', 'words_per_caption': (2, 5), 'font': 'bold white, black outline'},
