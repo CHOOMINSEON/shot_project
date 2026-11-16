@@ -7,6 +7,7 @@ import time as _clock
 from pathlib import Path
 
 import numpy as np
+from .storage import asset_file
 from .settings import CORES, DATA
 from . import scene_models
 
@@ -56,7 +57,7 @@ def connection(asset_id):
 
 
 def fingerprint(asset):
-    p=DATA/'assets'/asset['id']/'original';stat=p.stat()
+    p=asset_file(DATA,asset['id']);stat=p.stat()
     return hashlib.sha256(f'{VERSION}:{stat.st_size}:{stat.st_mtime_ns}'.encode()).hexdigest()
 
 
@@ -98,7 +99,7 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
         previous_id=conn.execute('SELECT id FROM frames ORDER BY start DESC LIMIT 1').fetchone()
         previous_id=previous_id['id'] if previous_id else None
         observed_end=0;begun=_clock.monotonic();begun_at=max(0,resume);pending=0
-        source=DATA/'assets'/asset['id']/'original'
+        source=asset_file(DATA,asset['id'])
         with av.open(str(source),options={'protocol_whitelist':'file,pipe'}) as container:
             stream=container.streams.video[0];stream.thread_type='AUTO';stream.codec_context.thread_count=min(8,max(2,CORES))
             origin=float((stream.start_time or 0)*stream.time_base)

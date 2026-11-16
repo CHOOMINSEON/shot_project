@@ -169,6 +169,9 @@ async function poll(){if(!project||$('login-dialog').open)return;const id=projec
   if(refresh&&!saving){const current=await api('/projects/'+id);if(project.id!==id)return;if(completedAuto&&current.revision===completedAuto.result.revision)remember(project.state);project=current;if(completedAuto){selected=0;rendered=null;currentSource=null;}draw();if(completedAuto?.status==='completed'&&completedAuto.result.render_signature===project.render_signature){$(completedAuto.kind==='guided_edit'?'guided-play':completedAuto.kind==='script_edit'?'script-play':'quick-play').click();toast(completedAuto.kind==='guided_edit'?'지침에 따라 추천 편집본을 만들었어요. 삭제한 구간과 확인 필요 항목을 확인해 주세요.':completedAuto.kind==='script_edit'?'대본 순서로 구간을 연결했어요. 찾지 못한 대사와 실제 장면을 확인해 주세요.':'무음 컷을 적용했어요. 편집본을 확인하고 고화질 MP4를 저장해 주세요.');}}
   drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();
 }
+async function linkLocal(paths){paths=paths.map(p=>p.trim().replace(/^"|"$/g,'')).filter(Boolean);if(!paths.length)return;if(!project)throw Error('먼저 프로젝트를 만들어 주세요.');await api('/projects/'+project.id+'/local-files',{method:'POST',body:JSON.stringify({paths})});toast(paths.length+'개 파일을 연결했어요. 영상 정보를 확인하고 있어요.');project=await api('/projects/'+project.id);draw();await poll();}
+bind('local-pick','click',async()=>{const r=await api('/local-pick',{method:'POST'});await linkLocal(r.paths||[]);});
+bind('local-add','click',async()=>{await linkLocal($('local-paths').value.split('\n'));$('local-paths').value='';});
 bind('jobs-cleanup','click',async()=>{const r=await api('/jobs/cleanup',{method:'POST'});toast(`작업을 모두 멈추고 지난 기록 ${r.cleared}개를 정리했어요.`);await poll();});
 bind('jobs','click',async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.cancelJob)await api('/jobs/'+b.dataset.cancelJob+'/cancel',{method:'POST'});if(b.dataset.retryJob)await api('/jobs/'+b.dataset.retryJob+'/retry',{method:'POST'});if(b.dataset.cleanJob)await api('/exports/'+b.dataset.cleanJob,{method:'DELETE'});if(b.dataset.previewJob){if(b.dataset.signature!==project.render_signature)throw Error('이 미리보기는 이전 컷 버전이에요. 최신 렌더 미리보기를 만들어 주세요.');rendered=b.dataset.previewJob;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(b.dataset.file)+'?inline=true',0,true);$('preview-label').textContent='렌더 미리보기 · 최종 출력과 같은 컷·화면·색 변환';applyFrame();}await poll();});
 
@@ -220,7 +223,7 @@ async function refreshDesktop(){
   config.model_ready=status.status==='ready';modelInfo();
 }
 action('desktop-setup-retry',async()=>{await api('/desktop/retry',{method:'POST'});await refreshDesktop();});
-async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
+async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();$('local-link').classList.toggle('hidden',!config.desktop);clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
 window.addEventListener('resize',waveform);window.addEventListener('DOMContentLoaded',init);
 
 const exampleScript=`아니 제가 CU 다섯 곳이나 돌아서 겨우 3개 구했거든요?

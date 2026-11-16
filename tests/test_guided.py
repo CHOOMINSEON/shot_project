@@ -65,9 +65,9 @@ def run(words=None, frames=None, guideline=None, style='oneshot', duration=60, *
 
 def test_default_guideline_is_parsed_without_closeup_misread():
     rules = guided.parse_guideline(default_guideline(), 'oneshot')
-    assert rules['target'] == (45, 60)
+    assert rules['target'] == (30, 90)
     assert rules['frame'] == 'auto'            # '제품 클로즈업'을 전체 크롭으로 오판하지 않음
-    assert {'packaging', 'opening', 'cutting', 'crosssection', 'eating', 'conclusion'} <= rules['keep']
+    assert {'packaging', 'opening', 'crosssection', 'eating', 'conclusion'} <= rules['keep']
     assert {'prep', 'repeat', 'retake', 'silence'} <= rules['drop']
     assert rules['hook'] == 'speech'
     assert rules['order'][0] == 'intro' and rules['order'][-1] == 'conclusion'
@@ -141,12 +141,12 @@ def test_long_silent_visual_is_trimmed_and_recorded():
 def test_length_trim_never_cuts_inside_a_sentence_or_drops_conclusion():
     words = []
     t = 1
-    for i in range(30):
+    for i in range(50):
         words.append(w(i, f' 일반 이야기 {i}번째 문장이에요.', t, t + 2))
         t += 3
     words.append(w(99, ' 결론은 다시 사 먹고 싶어요.', t, t + 2))
     result, _, a = run(words, duration=t + 5)
-    assert result['seconds'] <= 60
+    assert result['seconds'] <= 90
     assert any('repurchase' in u['labels'] for u in result['units'])
     spans = [(x['speech_start'] if 'speech_start' in x else None) for x in result['units']]
     for clip in result['clips']:

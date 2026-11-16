@@ -369,6 +369,70 @@ async def upload_chunk(ident: str, index: int, request: Request):
         temporary.unlink(missing_ok=True)
 
 
+LOCAL_MEDIA = {'.mp4', '.mov', '.mkv', '.m4v', '.webm', '.avi', '.mts', '.mp3', '.m4a', '.wav', '.aac', '.flac'}
+
+
+class LocalFiles(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=50)
+
+
+def desktop_only(request):
+    # 내 PC에서만 도는 데스크톱 앱에서만 허용한다(서버 배포본에서 임의 경로를 읽지 못하게).
+    if getattr(request.app.state, 'desktop_setup', None) is None and os.getenv('STUDIO_LOCAL_PATHS') != '1':
+        raise HTTPException(403, 'PC 파일 바로 연결은 데스크톱 앱에서만 쓸 수 있어요.')
+
+
+@app.post('/api/local-pick')
+def local_pick(request: Request):
+    """Windows 파일 선택 창을 띄워 고른 파일 경로를 돌려준다(파일 내용은 옮기지 않는다)."""
+    desktop_only(request)
+    if os.name != 'nt':
+        raise HTTPException(501, '이 기능은 Windows에서만 지원해요. 경로를 직접 붙여 넣어 주세요.')
+    import subprocess
+    script = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;Add-Type -AssemblyName System.Windows.Forms;"
+              "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false;Opacity=0};$o.Show();"
+              "$d=New-Object System.Windows.Forms.OpenFileDialog;$d.Multiselect=$true;$d.Title='편집할 영상·오디오 선택';"
+              "$d.Filter='영상·오디오|*.mp4;*.mov;*.mkv;*.m4v;*.webm;*.avi;*.mts;*.mp3;*.m4a;*.wav;*.aac;*.flac|모든 파일|*.*';"
+              "if($d.ShowDialog($o) -eq 'OK'){$d.FileNames};$o.Close()")
+    try:
+        done = subprocess.run(['powershell', '-NoProfile', '-STA', '-Command', script], capture_output=True, timeout=600,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except Exception as exc:
+        raise HTTPException(500, '파일 선택 창을 열지 못했어요. 경로를 직접 붙여 넣어 주세요. (' + str(exc)[:200] + ')')
+    return {'paths': [line.strip() for line in done.stdout.decode('utf-8', 'replace').splitlines() if line.strip()]}
+
+
+@app.post('/api/projects/{ident}/local-files')
+def link_local_files(ident: str, body: LocalFiles, request: Request):
+    """업로드(복사) 없이 PC에 있는 원본 경로만 등록한다. 원본을 옮기거나 지우면 다시 연결해야 한다."""
+    desktop_only(request)
+    project(ident)
+    checked = []
+    for raw in body.paths:
+        path = Path(raw.strip().strip('"'))
+        if not path.is_absolute() or not path.is_file():
+            raise HTTPException(422, f'파일을 찾을 수 없어요: {raw}')
+        if path.suffix.lower() not in LOCAL_MEDIA:
+            raise HTTPException(422, f'영상·오디오 파일만 연결할 수 있어요: {path.name}')
+        size = path.stat().st_size
+        if not 0 < size <= MAX_FILE_BYTES:
+            raise HTTPException(422, f'{path.name}: 파일당 최대 10GB입니다.')
+        checked.append((path.resolve(), size))
+    jobs = []
+    for path, size in checked:
+        asset_id, job_id = db.uid(), db.uid()
+        (DATA / 'assets' / asset_id).mkdir()
+        (DATA / 'assets' / asset_id / 'source.path').write_text(str(path), encoding='utf-8')
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('INSERT INTO assets (id,project_id,name,size,status,created) VALUES (?,?,?,?,?,?)',
+                         (asset_id, ident, path.name, size, 'checking', time.time()))
+            conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
+                         (job_id, ident, 'ingest', 'queued', json.dumps({'asset_id': asset_id}), time.time(), time.time()))
+        jobs.append(job_id)
+    return {'job_ids': jobs}
+
+
 @app.post('/api/uploads/{ident}/complete')
 async def complete_upload(ident: str):
     async with lock_for(ident):
@@ -621,6 +685,7 @@ class GuidedEdit(BaseModel):
     style: str = Field(default='auto', pattern='^(auto|oneshot|cook_mukbang|recipe|vlog|restaurant|commentary)$')
     frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
+    fast: bool = False  # 화면(장면·글자) 분석을 건너뛰고 말소리만으로 편집
 
 
 @app.post('/api/projects/{ident}/guided-edit')

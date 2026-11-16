@@ -23,7 +23,8 @@ MODEL_LOCK = threading.Lock()
 
 
 def asset_path(ident):
-    return DATA / 'assets' / ident / 'original'
+    from .storage import asset_file
+    return asset_file(DATA, ident)
 
 
 def atomic_json(path, value):
@@ -100,7 +101,7 @@ def ingest(ident, payload):
     update(ident, .4, '영상 정보 확인 완료 · 대표 이미지 생성')
     if metadata['has_video']:
         run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-ss', str(min(1, metadata['duration'] / 2)),
-                '-i', path, '-frames:v', '1', '-vf', 'scale=240:-2', '-update', '1', path.parent / 'thumbnail.jpg'],
+                '-i', path, '-frames:v', '1', '-vf', 'scale=240:-2', '-update', '1', DATA / 'assets' / asset['id'] / 'thumbnail.jpg'],
                DATA / 'work' / ident, lambda: is_cancelled(ident))
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
@@ -439,6 +440,22 @@ def edit_script(ident, payload):
     return {**result,**exported}
 
 
+STAGE_CLOCK = {}
+
+
+def stage_log(ident, label):
+    """어느 단계가 오래 걸리는지 확인할 수 있게 단계별 소요 시간을 timing.log에 남긴다."""
+    now = time.time()
+    start, last = STAGE_CLOCK.get(ident, (now, now))
+    STAGE_CLOCK.clear()
+    STAGE_CLOCK[ident] = (start, now)
+    try:
+        with open(DATA / 'timing.log', 'a', encoding='utf-8') as file:
+            file.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} [{MODEL_DEVICE}] {label}: 이 단계 {now - last:.0f}초 · 누적 {now - start:.0f}초\n')
+    except OSError:
+        pass
+
+
 def guided_edit(ident, payload):
     """편집 지침 기반 자동 편집: 전사 → 장면·OCR 인덱스 → 제품 근거 → 규칙 기반 구간 선택 → 미리보기."""
     with db.connection() as conn:
@@ -449,6 +466,8 @@ def guided_edit(ident, payload):
             raw = conn.execute('SELECT state FROM projects WHERE id=?', (job['project_id'],)).fetchone()
         product_info = json.loads(raw['state']).get('scene_products', [])
         vocabulary = ', '.join(' '.join([p.get('name', ''), p.get('brand', ''), p.get('variant', '')]) for p in product_info)[:1000]
+        STAGE_CLOCK.pop(ident, None)
+        stage_log(ident, '자동 편집 시작')
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset = db.get_asset(asset_id)
@@ -462,12 +481,15 @@ def guided_edit(ident, payload):
         # 소리만 쓸 영상(또는 오디오 파일)은 장면 선택 대상이 아니라 '입힐 소리' 목록으로 보낸다.
         videos = [a for a in assets.values() if a['metadata'].get('has_video', True) and a['id'] not in audio_sources]
         narration = [a for a in assets.values() if not a['metadata'].get('has_video', True) or a['id'] in audio_sources]
-        for n, asset in enumerate(videos):
+        stage_log(ident, '음성 인식 끝')
+        # 빠른 편집: 화면(장면·글자) 분석을 건너뛴다. 말소리 없는 단면·시식 컷은 자동으로 찾지 못한다.
+        for n, asset in enumerate([] if payload.get('fast') else videos):
             summary = scene_index.build(asset, lambda: check_cancel(ident), lambda v, m: update(ident, .1 + .24 * (n + v) / len(videos), m))
             with db.connection() as conn:
                 analysis = {**db.get_asset(asset['id'])['analysis'], 'scenes': summary}
                 conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(analysis, ensure_ascii=False), asset['id']))
             asset['analysis'] = analysis
+        stage_log(ident, '화면 분석 끝' if not payload.get('fast') else '화면 분석 생략(빠른 편집)')
         update(ident, .36, '제품 근거(OCR·참고 이미지·연속성) 계산')
         with db.connection() as conn:
             snapshot = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
@@ -487,6 +509,7 @@ def guided_edit(ident, payload):
         if payload.get('frame') in ('blur', 'fill', 'fit'):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
+        stage_log(ident, '제품 근거 계산 끝')
         update(ident, .5, '지침에 따라 구간 선택·구성')
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
         lines = []

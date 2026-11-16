@@ -84,7 +84,9 @@ def main(shot):
         page.on('response', lambda r: r.status == 404 and missing.append(r.url.replace(base, '/')))
         page.goto(base)
         page.wait_for_selector('#guided-report .script-row', timeout=10000)
-        assert page.input_value('#guided-text').startswith('업로드한 음식 리뷰 영상'), '기본 지침이 보여야 함'
+        assert page.input_value('#guided-text').startswith('업로드한 영상에서 중요한 부분'), '기본 지침이 보여야 함'
+        assert not page.is_visible('#advanced-edit'), '세부 편집 영역은 보이지 않아야 함'
+        assert page.locator('#guided-fast').count() == 1
         assert page.locator('#guided-style option').count() == 7
         assert page.locator('#guided-report .script-row.matched, #guided-report .script-row.missing').count() >= 8
         text = page.text_content('#guided-report')

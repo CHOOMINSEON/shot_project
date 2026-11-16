@@ -3,6 +3,15 @@ import os
 from pathlib import Path
 
 
+def asset_file(data, ident):
+    """원본 위치. 'PC 파일 바로 연결'로 등록한 원본은 복사하지 않고 source.path에 적힌 실제 경로를 쓴다."""
+    folder = Path(data) / 'assets' / ident
+    pointer = folder / 'source.path'
+    if pointer.exists():
+        return Path(pointer.read_text(encoding='utf-8').strip())
+    return folder / 'original'
+
+
 def mark_sparse(file):
     if os.name != 'nt':
         return
