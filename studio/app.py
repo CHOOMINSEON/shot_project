@@ -900,7 +900,7 @@ def render(ident: str, body: Render):
 def jobs(project_id: str | None = None):
     with db.connection() as conn:
         rows = conn.execute('SELECT id,project_id,kind,status,progress,message,result,created,updated FROM jobs '
-                            + ('WHERE project_id=? ' if project_id else '') + 'ORDER BY created DESC LIMIT 100',
+                            + ('WHERE project_id=? OR status=\'running\' ' if project_id else '') + 'ORDER BY created DESC LIMIT 100',
                             (project_id,) if project_id else ()).fetchall()
     return [{**dict(r), 'result': json.loads(r['result'])} for r in rows]
 

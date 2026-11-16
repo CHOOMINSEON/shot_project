@@ -550,11 +550,15 @@ def loop():
     while not STOP.wait(.3):
         with db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created LIMIT 1").fetchone()
+            # 방금 요청한 작업이 오래된 대기 작업 뒤에 갇히지 않도록 최신 요청부터 처리한다.
+            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created DESC LIMIT 1").fetchone()
             if not row:
                 continue
             ident = row['id']
             conn.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), ident))
+            waiting = conn.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created DESC").fetchall()
+            for place, other in enumerate(waiting, 1):
+                conn.execute("UPDATE jobs SET message=? WHERE id=?", (f'대기 중 (앞에 {place}개 작업이 먼저 처리됩니다)', other['id']))
         try:
             check_cancel(ident)
             payload = json.loads(row['payload'])
