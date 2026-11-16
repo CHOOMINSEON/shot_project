@@ -905,6 +905,20 @@ def jobs(project_id: str | None = None):
     return [{**dict(r), 'result': json.loads(r['result'])} for r in rows]
 
 
+@app.post('/api/jobs/cleanup')
+def cleanup_jobs():
+    """대기·진행 중인 작업을 모두 중단하고, 끝난 작업의 기록과 임시·출력 파일을 지운다."""
+    with db.connection() as conn:
+        conn.execute("UPDATE jobs SET status='cancelled',message='사용자가 중단했어요' WHERE status='queued'")
+        conn.execute("UPDATE jobs SET cancel=1 WHERE status='running'")
+        done = [r['id'] for r in conn.execute("SELECT id FROM jobs WHERE status IN ('completed','failed','cancelled') AND kind!='ingest'")]
+        conn.executemany('DELETE FROM jobs WHERE id=?', [(i,) for i in done])
+    for ident in done:
+        shutil.rmtree(DATA / 'exports' / ident, ignore_errors=True)
+        shutil.rmtree(DATA / 'work' / ident, ignore_errors=True)
+    return {'cleared': len(done)}
+
+
 @app.post('/api/jobs/{ident}/cancel')
 def cancel(ident: str):
     with db.connection() as conn:

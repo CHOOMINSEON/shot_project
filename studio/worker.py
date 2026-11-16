@@ -546,6 +546,8 @@ def guided_edit(ident, payload):
 def loop():
     # One worker / one uvicorn process. Durable queued jobs survive a server restart.
     with db.connection() as conn:
+        # 원본 검사는 짧아서 이어서 하고, 오래 걸리는 분석·편집·렌더는 되살리지 않는다(예전 작업이 새 작업을 막던 문제).
+        conn.execute("UPDATE jobs SET status='cancelled',message='이전 실행의 작업이라 중단했어요. 필요하면 다시 실행하세요.' WHERE kind!='ingest' AND status IN ('queued','running')")
         conn.execute("UPDATE jobs SET status='queued',message='서버 재시작 후 작업 재개' WHERE status='running'")
     while not STOP.wait(.3):
         with db.connection() as conn:

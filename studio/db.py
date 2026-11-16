@@ -50,9 +50,16 @@ def init():
         ''')
 
 
+SUPERSEDED = ('guided_edit', 'script_edit', 'auto_cut')
+
+
 def job(project_id, kind, payload):
     ident = uid()
     with connection() as db:
+        if kind in SUPERSEDED:
+            # 같은 프로젝트의 이전 자동 편집은 더 이상 필요 없으므로 대기열에서 치우고, 돌고 있으면 중단시킨다.
+            db.execute("UPDATE jobs SET status='cancelled',message='새 작업으로 대체됨' WHERE project_id=? AND kind IN ('guided_edit','script_edit','auto_cut') AND status='queued'", (project_id,))
+            db.execute("UPDATE jobs SET cancel=1 WHERE project_id=? AND kind IN ('guided_edit','script_edit','auto_cut') AND status='running'", (project_id,))
         db.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
                    (ident, project_id, kind, 'queued', json.dumps(payload, ensure_ascii=False), time.time(), time.time()))
     return ident
