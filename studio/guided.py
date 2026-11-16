@@ -615,6 +615,11 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
 
     warnings = []
     hook_unit = None
+    laid_units = []
+    if rules.get('overlay_eating', True):
+        kept, overlaid, laid_units = overlay_eating(kept)
+        if overlaid:
+            notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
     if total(kept) > target_max:
         order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -(u['end'] - u['start'])))
         for u in order:
@@ -660,7 +665,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     review_items = [{'filename': u['filename'], 'start': u['start'], 'end': u['end'], 'role': u['role'],
                      'review': u['review'] + (u.get('product', {}).get('uncertain', []) if u.get('product', {}).get('status') == '확인 필요' else [])}
                     for u in kept if u['review'] or u.get('product', {}).get('status') == '확인 필요']
-    return {'clips': clips, 'units': [_public(u) for u in kept], 'removed': sorted(removed, key=lambda r: (r['filename'], r['start'])),
+    return {'clips': clips, 'units': [_public(u) for u in kept] + [_public(u) for u in laid_units], 'removed': sorted(removed, key=lambda r: (r['filename'], r['start'])),
             'moved': moved, 'warnings': warnings + notes, 'missing': missing, 'review': review_items,
             'seconds': round(total(kept), 3), 'target': list(rules['target']), 'style': rules['style'],
             'applied': rules['applied'], 'unapplied': rules['unapplied']}
@@ -680,6 +685,8 @@ def _reason(u):
         text = ', '.join(LABEL_KO.get(l, l) for l in u['labels'])
         extra = f' · 화면: {", ".join(ROLE_LABEL.get(r, r) for r in u["visual_roles"])}' if u['visual_roles'] else ''
         return f'실제 발화({text}){extra}'
+    if u['kind'] == 'visual' and u.get('overlaid'):
+        return f'{ROLE_LABEL.get(u["role"], u["role"])} 장면 · 맛 평가 소리 위에 화면으로 사용'
     if u['kind'] == 'visual':
         return f'말 없는 {ROLE_LABEL.get(u["role"], u["role"])} 장면 · 음성이 없어도 보존'
     return '분석 결과가 없어 원본 유지'
@@ -704,6 +711,50 @@ def _pick_hook(units):
         if not best or score > best[0]:
             best = (score, u)
     return best[1] if best else None
+
+
+OVERLAY_ROLES = ('eating', 'crosssection', 'cutting', 'opening')
+
+
+def overlay_eating(kept, window=240.):
+    """맛 평가 발화 위에 가까운 '말 없는 시식·단면 컷'을 화면으로 얹는다(소리는 발화 그대로).
+
+    완성본 1116을 원본과 대조한 결과: 소리 컷 60개 중 28개가 이 방식(먹는 화면 + 나중에 말한 평가 소리)이었고,
+    그중 22개는 화면이 소리보다 앞선 장면(중앙값 105초 전, 최대 147초 전)이며 화면도 촬영 순서대로 이어졌다.
+    완성본 화면은 원본을 좌우반전한 상태였다(자동 적용하지 않음).
+    제품을 들어 보이며 소개하는 말, 점수("N점 드릴게요"), 결론은 얼굴이 보이는 원래 화면을 그대로 쓴다.
+    얹는 데 쓴 시식 컷은 단독 구간으로는 넣지 않는다(같은 장면이 두 번 나오지 않게).
+    """
+    pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES]
+    used, count = set(), 0
+    for s in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
+        labels = set(s['labels'])
+        if not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro'}:
+            continue
+        name = (s.get('product') or {}).get('name')
+        best = None
+        for p in pool:
+            v = p['unit']
+            if v['asset_id'] != s['asset_id'] or v['end'] - p['cursor'] < .6:
+                continue
+            other = (v.get('product') or {}).get('name')
+            if name and other and name != other:
+                continue
+            gap = s['start'] - v['end'] if v['end'] <= s['start'] else (v['start'] - s['end']) * 4 + 1   # 먹고 나서 말한 경우를 우선
+            if 0 <= gap <= window and (best is None or gap < best[0]):
+                best = (gap, p)
+        if not best:
+            continue
+        p = best[1]
+        take = min(p['unit']['end'] - p['cursor'], s['end'] - s['start'])
+        s['overlay'] = {'start': p['cursor'], 'end': p['cursor'] + take, 'role': p['unit']['role']}
+        p['cursor'] += take
+        used.add(id(p['unit']))
+        count += 1
+    laid = [u for u in kept if id(u) in used]
+    for u in laid:
+        u['overlaid'] = True
+    return [u for u in kept if id(u) not in used], count, laid
 
 
 def _group_by_product(units):
@@ -734,7 +785,21 @@ def _merge_clips(kept, assets, rules, fps):
     for u in kept:
         a = meta[u['asset_id']]
         frame = _frame_for(a, rules)
-        if cur and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < .5:
+        over = u.get('overlay')
+        if over:
+            # 화면만 다른 장면(시식·단면)으로 바꾸는 구간은 따로 떼어 낸다. 시식 컷이 발화보다 짧으면 남는 뒷부분은 원래 화면.
+            if cur:
+                clips.append(cur)
+            take = over['end'] - over['start']
+            whole = (u['end'] - u['start']) - take < .4
+            split = u['end'] if whole else u['start'] + take
+            clips.append({'asset_id': u['asset_id'], 'start': u['start'], 'end': split, 'frame': frame,
+                          'visual_asset_id': u['asset_id'], 'visual_start': over['start'], 'visual_end': over['end'],
+                          'guided': {'units': [{**_brief(u), 'reason': _reason(u) + f' · 화면은 {ROLE_LABEL.get(over["role"], over["role"])} 컷'}]}})
+            cur = None if whole else {'asset_id': u['asset_id'], 'start': split, 'end': u['end'], 'frame': frame,
+                                      'guided': {'units': [_brief(u)]}}
+            continue
+        if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < .5:
             cur['end'] = max(cur['end'], u['end'])
             cur['guided']['units'].append(_brief(u))
         else:
@@ -752,6 +817,10 @@ def _merge_clips(kept, assets, rules, fps):
         c['start'] = max(0., math.floor(c['start'] * fps) / fps)
         c['end'] = max(c['start'] + 1 / fps, math.ceil(c['end'] * fps) / fps)
         c['end'] = min(c['end'], math.floor(meta[c['asset_id']]['metadata']['duration'] * fps) / fps)
+        if c.get('visual_asset_id'):
+            limit = meta[c['visual_asset_id']]['metadata']['duration']
+            c['visual_start'] = max(0., min(c['visual_start'], limit - 2 / fps))
+            c['visual_end'] = min(limit, max(c['visual_start'] + 1 / fps, min(c['visual_end'], c['visual_start'] + c['end'] - c['start'])))
         if c['end'] > c['start']:
             out.append(c)
     return out

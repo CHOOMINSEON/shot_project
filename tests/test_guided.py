@@ -120,7 +120,8 @@ def test_silent_eating_and_cross_section_are_kept_but_idle_is_cut():
     result, _, _ = run(frames=frames)
     roles = [u['role'] for u in result['units'] if u['kind'] == 'visual']
     assert 'crosssection' in roles and 'eating' in roles
-    assert any(c['start'] <= 13 and c['end'] >= 16 for c in result['clips'])
+    # 말 없는 단면·시식 컷은 단독으로 남거나, 맛 평가 소리 위에 화면으로 얹혀서 남는다
+    assert any((c['start'] <= 13 and c['end'] >= 16) or (c.get('visual_asset_id') and 12 <= c['visual_start'] < 19) for c in result['clips'])
     # 4~7초 대기는 어떤 클립에도 포함되지 않음
     assert not any(c['start'] < 6 < c['end'] for c in result['clips'])
 
@@ -342,3 +343,32 @@ def test_score_verdict_is_classified_and_never_trimmed():
             t += 2.5
     result, _, _ = run(words, duration=t + 5)
     assert any('score' in u['labels'] for u in result['units'])
+
+
+def test_eating_shot_is_laid_over_later_taste_comment_and_not_repeated():
+    words = [w(1, ' 오늘은 편의점 신상 찹쌀떡을 먹어볼게요.', 2, 5),
+             w(2, ' 식감이 정말 쫄깃하고 맛있어요.', 30, 33),        # 먹고 나서 말한 평가 → 먹는 화면을 얹는다
+             w(3, ' 이건 8점 드릴게요.', 36, 38)]                    # 점수는 얼굴 화면 그대로
+    frames = [frame(0, 14, 16, {'eating': .3}, shot=1), frame(1, 16, 18, {'eating': .3}, shot=1)]
+    result, _, a = run(words, frames=frames, duration=45)
+    timeline.validate_state({'clips': result['clips'], 'fps': 30, 'quality': 'standard', 'protections': []}, {'v': a})
+    over = [c for c in result['clips'] if c.get('visual_asset_id')]
+    assert len(over) == 1
+    c = over[0]
+    assert 29 < c['start'] < 31 and 32 < c['end'] < 34           # 소리는 평가 발화
+    assert 13.9 <= c['visual_start'] < 15 and c['visual_end'] <= 18.01   # 화면은 먹는 장면
+    assert abs((c['visual_end'] - c['visual_start']) - (c['end'] - c['start'])) < .45
+    plain = [c for c in result['clips'] if not c.get('visual_asset_id')]
+    assert not any(c['start'] < 18 and c['end'] > 14 for c in plain)   # 얹은 시식 컷이 단독으로 또 나오지 않음
+    assert any(35 < c['start'] < 37 for c in plain)                    # 점수 발화는 원래 화면
+    assert any('화면을 얹었어요' in n for n in result['warnings'])
+
+
+def test_short_eating_shot_covers_only_the_start_of_a_long_comment():
+    words = [w(1, ' 식감이 정말 쫄깃하고 촉촉하고 부드럽고 달달해서 계속 먹게 되는 맛이에요.', 30, 36)]
+    frames = [frame(0, 20, 21.5, {'eating': .3}, shot=1)]
+    result, _, _ = run(words, frames=frames, duration=45)
+    over = [c for c in result['clips'] if c.get('visual_asset_id')]
+    assert len(over) == 1 and over[0]['end'] - over[0]['start'] < 2.1
+    rest = [c for c in result['clips'] if not c.get('visual_asset_id') and c['start'] >= over[0]['end'] - .05]
+    assert rest and rest[0]['end'] > 35.5       # 남는 뒷부분은 원래 화면으로 이어짐

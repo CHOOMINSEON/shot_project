@@ -516,14 +516,7 @@ def guided_edit(ident, payload):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
         stage_log(ident, '제품 근거 계산 끝')
-        # 배속: 화면에서 고른 값(지침에 'N배속'이 있으면 그 값). 목표 길이는 배속 후 기준이므로 원본 기준으로는 그만큼 더 담는다.
-        speed = float(payload.get('speed') or 1)
-        if (m := re.search(r'(\d(?:\.\d+)?)\s*배속', payload['guideline'])) and 1 <= float(m[1]) <= 2:
-            speed = float(m[1])
-        speed = min(2., max(1., speed))
-        if speed != 1:
-            rules['target'] = (rules['target'][0] * speed, rules['target'][1] * speed)
-            rules['applied'].append(f'최종 출력 {speed:g}배속(목표 길이는 배속 후 기준)')
+        speed = 1.   # 배속은 넣지 않는다(사용자가 캡컷에서 직접 적용)
         update(ident, .5, '지침에 따라 구간 선택·구성')
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
         lines = []

@@ -686,7 +686,7 @@ class GuidedEdit(BaseModel):
     frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
     fast: bool = True  # 키프레임만 보고 글자 인식(OCR)을 생략하는 빠른 화면 분석
-    speed: float = Field(default=1.4, ge=1, le=2)  # 최종 출력 배속(완성본 1116 실측 1.4배)
+    speed: float = Field(default=1, ge=1, le=2)  # 배속은 사용자가 캡컷에서 직접 건다(기본 1 = 원래 속도)
 
 
 @app.post('/api/projects/{ident}/guided-edit')
