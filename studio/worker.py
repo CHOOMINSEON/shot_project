@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import wave
@@ -579,6 +580,20 @@ def guided_edit(ident, payload):
     return {**result, **exported}
 
 
+def _claim_next():
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        # 방금 요청한 작업이 오래된 대기 작업 뒤에 갇히지 않도록 최신 요청부터 처리한다.
+        row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created DESC LIMIT 1").fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), row['id']))
+        waiting = conn.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created DESC").fetchall()
+        for place, other in enumerate(waiting, 1):
+            conn.execute("UPDATE jobs SET message=? WHERE id=?", (f'대기 중 (앞에 {place}개 작업이 먼저 처리됩니다)', other['id']))
+    return row
+
+
 def loop():
     # One worker / one uvicorn process. Durable queued jobs survive a server restart.
     with db.connection() as conn:
@@ -586,17 +601,13 @@ def loop():
         conn.execute("UPDATE jobs SET status='cancelled',message='이전 실행의 작업이라 중단했어요. 필요하면 다시 실행하세요.' WHERE kind!='ingest' AND status IN ('queued','running')")
         conn.execute("UPDATE jobs SET status='queued',message='서버 재시작 후 작업 재개' WHERE status='running'")
     while not STOP.wait(.3):
-        with db.connection() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            # 방금 요청한 작업이 오래된 대기 작업 뒤에 갇히지 않도록 최신 요청부터 처리한다.
-            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created DESC LIMIT 1").fetchone()
-            if not row:
-                continue
-            ident = row['id']
-            conn.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), ident))
-            waiting = conn.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created DESC").fetchall()
-            for place, other in enumerate(waiting, 1):
-                conn.execute("UPDATE jobs SET message=? WHERE id=?", (f'대기 중 (앞에 {place}개 작업이 먼저 처리됩니다)', other['id']))
+        try:
+            row = _claim_next()
+        except sqlite3.Error:
+            continue   # DB가 잠깐 잠겼거나 준비 전이어도 작업 처리기가 죽지 않게 한다
+        if not row:
+            continue
+        ident = row['id']
         try:
             check_cancel(ident)
             payload = json.loads(row['payload'])
