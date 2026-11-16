@@ -75,17 +75,18 @@ def load(asset_id):
     return records,vectors
 
 
-def build(asset,check=lambda:None,progress=lambda value,message:None):
+def build(asset,check=lambda:None,progress=lambda value,message:None,fast=False):
+    """fast=True: 키프레임만 디코딩하고 글자 인식(OCR)을 생략한다. 단면·시식 같은 장면 후보(CLIP)는 그대로 찾는다."""
     if not asset['metadata'].get('has_video',True):return {'count':0,'version':VERSION,'complete':True}
     import av
     from PIL import Image
     model=scene_models.load(check,lambda message:progress(0,message))
     keys=list(PROMPTS);text_vectors=model.texts(list(PROMPTS.values()))
-    length=asset['metadata']['duration'];stamp=fingerprint(asset);folder=directory(asset['id'])
+    length=asset['metadata']['duration'];full_stamp=fingerprint(asset);stamp=full_stamp+(':fast' if fast else '');folder=directory(asset['id'])
     conn=connection(asset['id'])
     try:
         meta={r['key']:json.loads(r['value']) for r in conn.execute('SELECT * FROM meta')}
-        if meta.get('fingerprint')==stamp and meta.get('complete'):
+        if meta.get('fingerprint') in (stamp,full_stamp) and meta.get('complete'):   # 정밀 분석이 이미 있으면 빠른 분석에서도 그대로 쓴다
             return {'count':conn.execute('SELECT COUNT(*) FROM frames').fetchone()[0],'version':VERSION,'complete':True}
         if meta.get('fingerprint')!=stamp:
             conn.execute('DELETE FROM frames');conn.execute('DELETE FROM meta');conn.commit()
@@ -102,6 +103,7 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
         source=asset_file(DATA,asset['id'])
         with av.open(str(source),options={'protocol_whitelist':'file,pipe'}) as container:
             stream=container.streams.video[0];stream.thread_type='AUTO';stream.codec_context.thread_count=min(8,max(2,CORES))
+            if fast:stream.codec_context.skip_frame='NONKEY'   # 키프레임(보통 0.5~2초 간격)만 풀어서 디코딩 시간을 크게 줄인다
             origin=float((stream.start_time or 0)*stream.time_base)
             if resume>0:container.seek(int(max(0,resume-.5+origin)/float(stream.time_base)),stream=stream)
             for frame in container.decode(stream):
@@ -116,13 +118,14 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                 change=float(np.mean(np.abs(small-previous))) if previous is not None else 0
                 cut=change>.18;previous=small
                 if cut:shot+=1;dense_until=time+1
-                spacing=.5 if time<dense_until else 1.
+                spacing=.75 if fast else .5 if time<dense_until else 1.
                 if not cut and time-last_sample<spacing and last_sample>=0:continue
                 image=frame.to_image().convert('RGB')
                 rotation=asset['metadata'].get('rotation',0)
                 if rotation:image=image.rotate(rotation,expand=True)
                 image.thumbnail((1536,1536),Image.Resampling.LANCZOS)
                 regions=scene_models.views(image)
+                if fast:regions=regions[:2]
                 options=[]
                 focus=['packaging','crosssection','cream','eating','cutting','cooking','bread','cookie','cake','drink']
                 for region,bounds in regions:
@@ -142,7 +145,8 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                     if key=='cream' and (raw[key]<.285 or raw[key]-raw['plain_bread']<.02):continue
                     if raw[key]>=cutoff and raw[key]-negative>=(.015 if key=='cream' else .04):tags[key]=round(raw[key],4)
                 full_view=options[0][1]
-                if (ocr_cache and not cut and time-ocr_cache[0]<5. and float(full_view@ocr_cache[1])>=.985):
+                if fast:ocr=[];ocr_size=list(image.size)
+                elif (ocr_cache and not cut and time-ocr_cache[0]<5. and float(full_view@ocr_cache[1])>=.985):
                     ocr=copy.deepcopy(ocr_cache[2]);ocr_size=list(ocr_cache[3])   # 거의 같은 화면: 직전 글자 인식 결과 재사용
                 else:
                     ocr_image=image.copy();ocr_image.thumbnail((OCR_MAX_SIDE,OCR_MAX_SIDE),Image.Resampling.LANCZOS)
@@ -175,7 +179,7 @@ def build(asset,check=lambda:None,progress=lambda value,message:None):
                 if pending>=10:conn.commit();pending=0   # 프레임마다 디스크에 쓰지 않고 10개씩(중단되면 마지막 몇 장만 다시 분석)
                 previous_id=ident;last_sample=time
                 done=max(.001,time-begun_at);elapsed=_clock.monotonic()-begun;left=max(0,(length-time)*elapsed/done)
-                progress(min(.99,time/length),f'{asset["name"]} · {int(time)}/{int(length)}초 · 장면·글자 분석 · 남은 시간 약 {int(left//60)}분')
+                progress(min(.99,time/length),f'{asset["name"]} · {int(time)}/{int(length)}초 · {'장면 분석(빠른)' if fast else '장면·글자 분석'} · 남은 시간 약 {int(left//60)}분')
         if previous_id:conn.execute('UPDATE frames SET end=? WHERE id=?',(min(length,observed_end or length),previous_id))
         conn.commit();flag_overlays(conn)
         conn.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('complete','true'));conn.commit()

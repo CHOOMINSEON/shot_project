@@ -88,3 +88,21 @@ def test_static_scene_reads_text_once_and_new_scene_reads_again(monkeypatch):
     assert model.reads <= result['count'] // 3, (model.reads, result['count'])   # 같은 장면은 5초마다만 다시 읽음(전엔 분석한 프레임마다 읽음)
     assert model.reads >= 2                    # 장면이 바뀌면 다시 읽는다
     assert any('남은 시간' in m for m in messages)
+
+
+def test_fast_mode_skips_text_reading_but_still_indexes_scenes(monkeypatch):
+    scene_index, model, seconds = run([20] * 10 + [220] * 10, monkeypatch)
+    ident = 'fast-asset'
+    folder = scene_index.DATA / 'assets' / ident
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'original').write_bytes(b'x')
+    asset = {'id': ident, 'name': 't.mp4', 'metadata': {'duration': seconds, 'has_video': True, 'rotation': 0}, 'analysis': {'words': []}}
+    result = scene_index.build(asset, fast=True)
+    assert result['complete'] and result['count'] >= 15
+    assert model.reads == 0                       # 글자 인식 생략
+    rows, vectors = scene_index.load(ident)
+    assert len(rows) == result['count'] and vectors is not None   # 장면 후보는 그대로 만든다
+    assert len({r['shot'] for r in rows}) == 2    # 장면 전환도 잡는다
+    before = model.images
+    assert scene_index.build(asset, fast=False)['count'] > 0 and model.reads > 0   # 정밀 분석을 요청하면 다시 만든다
+    assert model.images > before

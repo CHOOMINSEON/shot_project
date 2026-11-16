@@ -685,7 +685,7 @@ class GuidedEdit(BaseModel):
     style: str = Field(default='auto', pattern='^(auto|oneshot|cook_mukbang|recipe|vlog|restaurant|commentary)$')
     frame: str = Field(default='auto', pattern='^(auto|fit|blur|fill)$')
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
-    fast: bool = False  # 화면(장면·글자) 분석을 건너뛰고 말소리만으로 편집
+    fast: bool = True  # 키프레임만 보고 글자 인식(OCR)을 생략하는 빠른 화면 분석
 
 
 @app.post('/api/projects/{ident}/guided-edit')

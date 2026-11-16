@@ -326,3 +326,19 @@ def test_commentary_style_and_viewer_question():
     assert 'conclusion' not in guided.classify('댓글로 요청받은 과자 먹어봤습니다')['labels']
     why = guided.classify('가오나시는 왜 치히로에게 금을 줬을까요?')
     assert 'question' in why['labels']
+
+
+def test_score_verdict_is_classified_and_never_trimmed():
+    assert 'score' in guided.classify('8점 드릴게요')['labels']
+    assert 'score' in guided.classify('이건 5점 드릴게요.')['labels']
+    assert 'score' not in guided.classify('이 점이 좋았어요')['labels']
+    assert 'score' not in guided.classify('장점이 많아요')['labels']
+    words, t = [], 1
+    for i in range(50):
+        words.append(w(i, f' 일반 이야기 {i}번째 문장이에요.', t, t + 2))
+        t += 3
+        if i == 10:
+            words.append(w(500, ' 이건 8점 드릴게요.', t, t + 1.5))
+            t += 2.5
+    result, _, _ = run(words, duration=t + 5)
+    assert any('score' in u['labels'] for u in result['units'])

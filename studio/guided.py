@@ -126,7 +126,12 @@ STYLES = {
 # 업로드한 완성본 6개(2026-10~11월, 21~70초)를 측정한 값. 평균 컷 0.9~1.3초(중앙값 0.8~1.1초), 분당 46~66컷,
 # 컷이 가장 길었던 곳은 먹는 장면(최대 7.7초). 자막은 화면 가운데, 흰 글씨+검은 외곽선, 2~5단어씩 끊어 표시.
 # 표본이 적어(스타일당 1개 안팎) 시작값으로만 쓰고, 지침·사용자 수정이 우선한다.
-CHANNEL_STYLE = {'median_cut': 0.9, 'cuts_per_minute': (46, 66), 'loudness_lufs': (-10.4, -8.1),
+# 2026-11 완성본 1116(GS25 신상 5종, 69.4초) 실측: 컷 52개(분당 약 45컷, 평균 1.3초), 후킹 4초 안에 전체샷·포장·한입·단면 4컷,
+# 제품별 블록 8~15초(포장 들어 보이기 → 고른 이유 → 개봉·단면 → 한입 → 짧은 반응 여러 개 → 가격 불만 → "N점 드릴게요"),
+# 마지막 3초에 1위 제품과 댓글 질문. 대본의 [실제 반응] 자리는 대본에 없는 즉흥 발화로 채워져 있다.
+CHANNEL_STYLE = {'multi_product': {'hook_seconds': 4, 'hook_shots': 4, 'block_seconds': (8, 15), 'block_end': 'score',
+                                   'outro_seconds': 3, 'total_seconds': 69, 'cuts': 52},
+                 'median_cut': 0.9, 'cuts_per_minute': (46, 66), 'loudness_lufs': (-10.4, -8.1),
                  'caption': {'position': 'center', 'words_per_caption': (2, 5), 'font': 'bold white, black outline'},
                  'structure': ['hook(face or food close-up)', 'cooking/unboxing close-ups', 'eating with face', 'verdict/question to camera']}
 
@@ -229,6 +234,8 @@ def critical_equal(a, b):
 
 TASTE = r'맛있|맛없|맛이|달[아고다콤]|달달|짜[다요서고]|짭|싱거|고소|느끼|매콤|맵[다고지]|쫄깃|바삭|촉촉|부드럽|쫀득|눅눅|퍽퍽|꾸덕|진하|담백|새콤|쓰[다고]|비리|단짠|풍미|식감|향이|냄새'
 CLASSIFIERS = [
+    # 제품별 마무리 점수("8점 드릴게요"): 실제 완성본(1116)에서 제품마다 이 한마디로 끝난다 → 길이를 줄여도 남긴다.
+    ('score', r'(\d+|[한두세네]|다섯|여섯|일곱|여덟|아홉|열|[일이삼사오육칠팔구십])\s*점\s*(드릴|줄게|줄\s*게|드려|드립|입니다|이에요|정도|만점)|\d+\s*점[.!…~]*\s*$|점\s*만점'),
     ('repurchase', r'재구매|다시\s*(사|먹|만들)|또\s*(사|먹|만들)|사\s*먹고\s*싶|사먹을|만들어\s*먹을'),
     ('conclusion', r'결론|총평|한\s*줄\s*평|추천(해|드|합)|비추|살\s*만|사\s*볼\s*만|돈\s*아깝|아깝지'),
     ('price', r'\d[\d,]*\s*원|가격|가성비|천\s*원|만\s*원|할인|행사|1\s*\+\s*1|2\s*\+\s*1'),
@@ -432,11 +439,11 @@ def product_for(frames_in_range, evidence, asset_id):
 
 
 # ------------------------------------------------------------------ 점수·길이
-SENTENCE_WEIGHT = [('repurchase', 10), ('conclusion', 10), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
+SENTENCE_WEIGHT = [('score', 10), ('repurchase', 10), ('conclusion', 10), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
                    ('question', 6), ('intro', 5), ('cooking', 4)]
 VISUAL_WEIGHT = {'eating': 7, 'crosssection': 6, 'cutting': 5, 'opening': 5, 'packaging': 5, 'cooking': 3}
-MUST_KEEP = {'repurchase', 'conclusion'}
-LABEL_KO = {'repurchase': '재구매 의사', 'conclusion': '결론', 'taste': '맛·식감 평가', 'con': '아쉬운 점', 'price': '가격',
+MUST_KEEP = {'repurchase', 'conclusion', 'score'}
+LABEL_KO = {'score': '점수', 'repurchase': '재구매 의사', 'conclusion': '결론', 'taste': '맛·식감 평가', 'con': '아쉬운 점', 'price': '가격',
             'pro': '장점', 'question': '질문', 'intro': '제품 소개', 'cooking': '조리 설명', 'chat': '일반 발화'}
 
 

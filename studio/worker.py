@@ -482,14 +482,15 @@ def guided_edit(ident, payload):
         videos = [a for a in assets.values() if a['metadata'].get('has_video', True) and a['id'] not in audio_sources]
         narration = [a for a in assets.values() if not a['metadata'].get('has_video', True) or a['id'] in audio_sources]
         stage_log(ident, '음성 인식 끝')
-        # 빠른 편집: 화면(장면·글자) 분석을 건너뛴다. 말소리 없는 단면·시식 컷은 자동으로 찾지 못한다.
-        for n, asset in enumerate([] if payload.get('fast') else videos):
-            summary = scene_index.build(asset, lambda: check_cancel(ident), lambda v, m: update(ident, .1 + .24 * (n + v) / len(videos), m))
+        # 빠른 편집: 키프레임만 보고 글자 인식을 생략한다. 말소리 없는 단면·시식 컷은 그대로 찾는다.
+        for n, asset in enumerate(videos):
+            summary = scene_index.build(asset, lambda: check_cancel(ident), lambda v, m: update(ident, .1 + .24 * (n + v) / len(videos), m),
+                                        fast=bool(payload.get('fast')))
             with db.connection() as conn:
                 analysis = {**db.get_asset(asset['id'])['analysis'], 'scenes': summary}
                 conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(analysis, ensure_ascii=False), asset['id']))
             asset['analysis'] = analysis
-        stage_log(ident, '화면 분석 끝' if not payload.get('fast') else '화면 분석 생략(빠른 편집)')
+        stage_log(ident, '화면 분석 끝' + ('(빠른)' if payload.get('fast') else '(정밀)'))
         update(ident, .36, '제품 근거(OCR·참고 이미지·연속성) 계산')
         with db.connection() as conn:
             snapshot = conn.execute('SELECT state,revision FROM projects WHERE id=?', (job['project_id'],)).fetchone()
