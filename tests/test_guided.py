@@ -372,3 +372,47 @@ def test_short_eating_shot_covers_only_the_start_of_a_long_comment():
     assert len(over) == 1 and over[0]['end'] - over[0]['start'] < 2.1
     rest = [c for c in result['clips'] if not c.get('visual_asset_id') and c['start'] >= over[0]['end'] - .05]
     assert rest and rest[0]['end'] > 35.5       # 남는 뒷부분은 원래 화면으로 이어짐
+
+
+def test_speech_tail_follows_fading_voice():
+    db = [60.] * 1000
+    env = {'rate': 100, 'db': db, 'floor': 20., 'voice': 60.}
+    for i in range(523, 1000):
+        db[i] = 20.                      # 5.0초에 단어가 끝났다고 인식됐지만 실제 소리는 5.23초까지 이어짐
+    tail = guided.speech_tail(env, 5.0)
+    assert .25 <= tail <= .32, tail
+    for i in range(500, 1000):
+        db[i] = 20.                      # 바로 끝나도 최소 0.15초
+    assert guided.speech_tail(env, 5.0) == guided.TAIL_MIN
+    for i in range(500, 1000):
+        db[i] = 60.                      # 계속 소리가 나면 최대 0.35초
+    assert guided.speech_tail(env, 5.0) == guided.TAIL_MAX
+    assert guided.speech_tail(None, 5.0) == guided.TAIL_DEFAULT
+
+
+def test_default_tail_is_longer_than_word_end():
+    result, _, _ = run([w(1, ' 이건 정말 맛있어요.', 10, 12), w(2, ' 다음 이야기를 해볼게요.', 20, 22)], duration=30)
+    speech = [u for u in result['units'] if u['kind'] == 'speech']
+    assert all(u['end'] - (12 if u['start'] < 15 else 22) >= .24 for u in speech)
+
+
+def test_hook_montage_lays_fast_product_shots_under_opening_line():
+    words = [w(1, ' 편의점 신상 찹쌀떡은 과연 무슨 맛일까요?', 1, 5)] + \
+            [w(10 + i, f' 일반 이야기 {i}번째 문장이에요.', 10 + 3 * i, 12 + 3 * i) for i in range(10)]
+    frames = [frame(i, 40 + 8 * i, 41.5 + 8 * i, {'packaging': .3}, shot=10 + i) for i in range(5)] + \
+             [frame(10, 90, 92, {'eating': .3}, shot=30), frame(11, 110, 112, {'crosssection': .3}, shot=40)]
+    result, _, a = run(words, frames=frames, duration=130)
+    timeline.validate_state({'clips': result['clips'], 'fps': 30, 'quality': 'standard', 'protections': []}, {'v': a})
+    head = [c for c in result['clips'] if c.get('visual_asset_id') and c['start'] < 5.3]
+    assert len(head) >= 4, head
+    fast = [c for c in head if c['end'] - c['start'] < .4]
+    assert len(fast) >= 3
+    assert all(39 <= c['visual_start'] <= 80 for c in fast)               # 포장 장면
+    assert any(c['visual_start'] >= 89 for c in head)                     # 한입·단면 장면
+    ordered = sorted(result['clips'], key=lambda c: c['start'])
+    for c, d in zip(ordered, ordered[1:]):
+        assert d['start'] >= c['end'] - 1e-6        # 같은 소리가 두 번 나오지 않음
+    pieces = sorted(head, key=lambda c: c['start'])
+    for c, d in zip(pieces, pieces[1:]):
+        assert abs(d['start'] - c['end']) < 1e-6                           # 소리는 끊김 없이 이어짐
+    assert any('후킹 멘트 아래' in n for n in result['warnings'])

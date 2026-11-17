@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import wave
@@ -445,6 +446,33 @@ def edit_script(ident, payload):
     return {**result,**exported}
 
 
+def audio_envelope(asset):
+    """10ms 단위 음량(dB). 말끝 여유(guided.speech_tail)에 쓴다. 원본별로 한 번만 계산해 저장한다."""
+    path = asset_path(asset['id'])
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    cache = DATA / 'assets' / asset['id'] / f'envelope-{stat.st_size}-{int(stat.st_mtime)}.npy'
+    try:
+        db = np.load(cache)
+    except (OSError, ValueError):
+        try:
+            raw = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(path), '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', '-'],
+                                 capture_output=True, timeout=1800, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        x = np.frombuffer(raw[:len(raw) // 320 * 320], np.int16).astype(np.float32).reshape(-1, 160)
+        if not len(x):
+            return None
+        db = (10 * np.log10((x ** 2).mean(1) + 1)).astype(np.float32)
+        try:
+            np.save(cache, db)
+        except OSError:
+            pass
+    return {'rate': 100, 'db': db, 'floor': float(np.percentile(db, 10)), 'voice': float(np.percentile(db, 90))}
+
+
 STAGE_CLOCK = {}
 
 
@@ -518,7 +546,12 @@ def guided_edit(ident, payload):
         stage_log(ident, '제품 근거 계산 끝')
         speed = 1.   # 배속은 넣지 않는다(사용자가 캡컷에서 직접 적용)
         update(ident, .5, '지침에 따라 구간 선택·구성')
+        for asset in videos:
+            if asset['analysis'].get('words'):
+                asset['_envelope'] = audio_envelope(asset)   # 말끝이 잘리지 않게 실제 음량으로 끝 여유를 정한다
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+        for asset in videos:
+            asset.pop('_envelope', None)   # 저장되는 데이터에 섞이지 않게
         lines = []
         for item in narration:
             lines += guided.narration_lines(item)

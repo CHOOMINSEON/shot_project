@@ -477,6 +477,29 @@ def _overlap(a0, a1, b0, b1):
     return max(0., min(a1, b1) - max(a0, b0))
 
 
+TAIL_MIN, TAIL_DEFAULT, TAIL_MAX = .2, .25, .35
+
+
+def speech_tail(envelope, end):
+    """문장 끝 뒤로 얼마나 더 둘지(초). 말끝이 흐려지며 잦아드는 소리까지 살린다.
+
+    envelope: {'rate': 초당 값 수, 'db': 10ms 음량(dB) 목록, 'floor': 바닥 소음, 'voice': 말소리 기준}.
+    음량이 말소리 기준 아래로 60ms 이상 내려간 지점 + 60ms. 범위 0.2~0.35초(사용자 요청: 0.2~0.3초 더). 정보가 없으면 0.25초
+    (인식기의 단어 끝 시간이 실제 말끝보다 이른 경우가 많아서, 1116 재현에서 0.2~0.3초를 더 둬야 자연스러웠다).
+    """
+    if not envelope:
+        return TAIL_DEFAULT
+    rate, db = envelope['rate'], envelope['db']
+    threshold = envelope['floor'] + .2 * (envelope['voice'] - envelope['floor'])   # 잦아드는 말끝(작은 소리)까지 말소리로 본다
+    start = int(end * rate)
+    quiet = 0
+    for i in range(start, min(len(db), start + int(TAIL_MAX * rate) + 1)):
+        quiet = quiet + 1 if db[i] < threshold else 0
+        if quiet >= 6:
+            return min(TAIL_MAX, max(TAIL_MIN, (i - 5) / rate - end + .06))
+    return TAIL_MAX if start < len(db) else TAIL_DEFAULT
+
+
 def _units_for_asset(asset, frames, evidence, rules, notes):
     """한 원본의 편집 단위(문장 단위 + 음성 없는 보존 장면 단위)."""
     duration = asset['metadata']['duration']
@@ -484,7 +507,8 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
     sentences = mark_redundant(split_sentences(words, duration))
     shots = build_shots(frames)
     fast = rules['fast']
-    pre, post = (.08, .12) if fast else (.12, .2)
+    pre = .08 if fast else .12
+    envelope = asset.get('_envelope')
     units = []
     for s in sentences:
         roles = [(sh['role'], _overlap(s['start'], s['end'], sh['start'], sh['end'])) for sh in shots]
@@ -492,7 +516,7 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
         rows = [r for r in frames if r['start'] < s['end'] and r['end'] > s['start']]
         labels = [l for l in s['labels'] if l in LABEL_KO] or ['chat']
         unit = {'kind': 'speech', 'asset_id': asset['id'], 'filename': asset['name'],
-                'start': max(0., s['start'] - pre), 'end': min(duration, s['end'] + post), 'speech_start': s['start'],
+                'start': max(0., s['start'] - pre), 'end': min(duration, s['end'] + speech_tail(envelope, s['end'])), 'speech_start': s['start'],
                 'speech_end': s['end'], 'text': s['text'], 'labels': labels, 'role': labels[0],
                 'visual_roles': roles[:2], 'confidence': s['confidence'], 'drop': s['drop'],
                 'review': list(s['review']), 'negated': s['negated'], 'numbers': s['numbers'],
@@ -661,6 +685,12 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'cook_mukbang', 'restaurant'):
         missing.append('먹는 장면 후보를 찾지 못했어요.')
 
+    if rules.get('hook_montage', True) and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
+        shots = build_shots(frames_by_asset.get(kept[0]['asset_id'], []))
+        pieces = hook_montage(kept[0], shots, fps)
+        if pieces:
+            kept[0]['montage'] = pieces
+            notes.append(f'후킹 멘트 아래에 제품 장면 {len(pieces)}컷을 빠르게 얹었어요(완성본 1116 방식). 화면이 맞는지 확인하세요.')
     clips = _merge_clips(kept, assets, rules, fps)
     review_items = [{'filename': u['filename'], 'start': u['start'], 'end': u['end'], 'role': u['role'],
                      'review': u['review'] + (u.get('product', {}).get('uncertain', []) if u.get('product', {}).get('status') == '확인 필요' else [])}
@@ -714,6 +744,53 @@ def _pick_hook(units):
 
 
 OVERLAY_ROLES = ('eating', 'crosssection', 'cutting', 'opening')
+
+
+MONTAGE_FAST = ('packaging', 'opening')
+MONTAGE_MAIN = ('eating', 'crosssection', 'cutting')
+
+
+def hook_montage(hook, shots, fps=30, fast_piece=.28, max_fast=5):
+    """후킹 발화 위에 제품 장면을 빠르게 얹는다(소리는 후킹 발화 그대로).
+
+    완성본 1116 실측: 첫 3.5초 동안 제품을 하나씩 놓는 0.2초 컷 5개(1.4배속 기준, 원래 속도 약 0.28초)
+    → 포장 클로즈업 → 한입 → 단면이 후킹 멘트 아래로 지나갔다. 같은 단면 컷은 본편에서 다시 쓰였다.
+    반환: [(소리 기준 시작, 끝, 화면 시작, 역할)] — 후킹 발화 구간 안의 상대 시간이 아니라 원본 시간.
+    """
+    length = hook['end'] - hook['start']
+    if length < 1.2:
+        return []
+    def spread(cands, n, gap):
+        picked = []
+        for sh in sorted(cands, key=lambda s: -(s['end'] - s['start'])):
+            if all(abs(sh['start'] - p['start']) >= gap for p in picked):
+                picked.append(sh)
+            if len(picked) == n:
+                break
+        return sorted(picked, key=lambda s: s['start'])
+    fast = spread([s for s in shots if s['role'] in MONTAGE_FAST and s['end'] - s['start'] >= fast_piece], max_fast, 5.)
+    main = spread([s for s in shots if s['role'] in MONTAGE_MAIN and s['end'] - s['start'] >= .6], 2, 10.)
+    step = 1 / fps
+    snap = lambda x: round(x / step) * step
+    pieces, t = [], snap(hook['start'])
+    budget_fast = length - (.8 * len(main))
+    for sh in fast:
+        if t + fast_piece > hook['start'] + budget_fast:
+            break
+        mid = (sh['start'] + sh['end'] - fast_piece) / 2
+        end = snap(t + fast_piece)
+        pieces.append((t, end, mid, sh['role']))
+        t = end
+    if main:
+        each = (hook['end'] - t) / len(main)
+        if each >= .5:
+            for k, sh in enumerate(main):
+                end = snap(hook['end']) if k == len(main) - 1 else snap(t + each)
+                take = min(end - t, sh['end'] - sh['start'])
+                end = snap(t + take) if k < len(main) - 1 else end
+                pieces.append((t, end, max(sh['start'], (sh['start'] + sh['end'] - (end - t)) / 2), sh['role']))
+                t = end
+    return pieces if len(pieces) >= 2 else []
 
 
 def overlay_eating(kept, window=240.):
@@ -785,6 +862,17 @@ def _merge_clips(kept, assets, rules, fps):
     for u in kept:
         a = meta[u['asset_id']]
         frame = _frame_for(a, rules)
+        if u.get('montage'):
+            if cur:
+                clips.append(cur)
+            for a0, a1, v0, role in u['montage']:
+                clips.append({'asset_id': u['asset_id'], 'start': a0, 'end': a1, 'frame': frame,
+                              'visual_asset_id': u['asset_id'], 'visual_start': v0, 'visual_end': v0 + (a1 - a0),
+                              'guided': {'units': [{**_brief(u), 'reason': '후킹 몽타주 · 화면은 ' + ROLE_LABEL.get(role, role) + ' 컷'}]}})
+            last = u['montage'][-1][1]
+            cur = {'asset_id': u['asset_id'], 'start': last, 'end': u['end'], 'frame': frame,
+                   'guided': {'units': [_brief(u)]}} if u['end'] - last >= 1 / fps else None
+            continue
         over = u.get('overlay')
         if over:
             # 화면만 다른 장면(시식·단면)으로 바꾸는 구간은 따로 떼어 낸다. 시식 컷이 발화보다 짧으면 남는 뒷부분은 원래 화면.
@@ -814,8 +902,8 @@ def _merge_clips(kept, assets, rules, fps):
         first = c['guided']['units'][0]
         c['id'] = f'guided-{i:03}'
         c['label'] = f'{i}. {first["role_label"]}' + (f' · {first["text"][:30]}' if first['text'] else '')
-        c['start'] = max(0., math.floor(c['start'] * fps) / fps)
-        c['end'] = max(c['start'] + 1 / fps, math.ceil(c['end'] * fps) / fps)
+        c['start'] = max(0., math.floor(c['start'] * fps + 1e-6) / fps)
+        c['end'] = max(c['start'] + 1 / fps, math.ceil(c['end'] * fps - 1e-6) / fps)
         c['end'] = min(c['end'], math.floor(meta[c['asset_id']]['metadata']['duration'] * fps) / fps)
         if c.get('visual_asset_id'):
             limit = meta[c['visual_asset_id']]['metadata']['duration']
