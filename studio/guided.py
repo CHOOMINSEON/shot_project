@@ -220,7 +220,15 @@ def parse_guideline(text, style='oneshot'):
     for word in UNSUPPORTED:
         if word in text:
             rules['unapplied'].append(f'{word}: 자동 적용하지 않음')
-    rules['applied'] += ['준비·재촬영·반복·긴 무음 줄이기', '문장 끝 보존']
+    rules['applied'] += ['준비·재촬영·반복·긴 무음 줄이기', '문장 끝 보존(말끝 여유 0.2~0.35초)']
+    # 먹방·시식형에서만 쓰는 연출(완성본 1116에서 배운 것). 해석·브이로그 영상에는 적용하지 않는다.
+    food = style in ('oneshot', 'cook_mukbang', 'restaurant')
+    rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
+    rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
+    if rules['overlay_eating']:
+        rules['applied'].append('맛 평가 소리 위에 직전의 먹는·단면 화면 얹기')
+    if rules['hook_montage']:
+        rules['applied'].append('후킹 멘트 아래 제품 장면 빠른 컷(0.28초씩)')
     return rules
 
 

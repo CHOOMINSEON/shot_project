@@ -416,3 +416,11 @@ def test_hook_montage_lays_fast_product_shots_under_opening_line():
     for c, d in zip(pieces, pieces[1:]):
         assert abs(d['start'] - c['end']) < 1e-6                           # 소리는 끊김 없이 이어짐
     assert any('후킹 멘트 아래' in n for n in result['warnings'])
+
+
+def test_food_only_effects_are_off_for_commentary_and_vlog():
+    for style, on in (('oneshot', True), ('cook_mukbang', True), ('restaurant', True), ('commentary', False), ('vlog', False)):
+        rules = guided.parse_guideline(default_guideline(), style)
+        assert rules['overlay_eating'] is on and rules['hook_montage'] is on, style
+    assert guided.parse_guideline(default_guideline(), 'recipe')['hook_montage']
+    assert not guided.parse_guideline(default_guideline() + '\n몽타주 빼줘', 'oneshot')['hook_montage']
