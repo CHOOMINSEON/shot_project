@@ -64,27 +64,14 @@ DEFAULT_GUIDELINE = """업로드한 영상에서 중요한 부분을 골라 세�
 - 광고·협찬 여부:
 - 참고 대본:"""
 
-DEFAULT_GUIDELINE_COMMENTARY = """업로드한 영화·TV·애니메이션 해석 영상에서 핵심 주장과 근거만 골라 세로 9:16 숏폼으로 편집해줘.
+DEFAULT_GUIDELINE_COMMENTARY = """영화·TV·애니메이션 해석 영상을 심플하게 정리해줘.
 
-목표 길이는 45~60초로 하되, 주장이나 문장 끝을 자르면서 억지로 길이를 맞추지 마.
+- 말 사이의 무음은 모두 빼줘.
+- 버벅이거나 말실수한 부분은 빼고, 같은 말을 여러 번 했으면 가장 잘 말한 한 번만 넣어줘.
+- 말끝이 흐려지지 않게 문장 끝은 살려줘.
+- 말한 순서는 그대로 두고, 길이를 맞추려고 내용을 빼지 마.
 
-남길 장면:
-- 영상 처음의 질문이나 핵심 주장
-- 작품 속 장면을 근거로 설명하는 발화
-- 내 해석이나 이유를 말하는 구간
-- 시청자에게 던지는 마지막 질문이나 결론
-
-줄일 부분:
-- 촬영 준비, 카메라 조정, 의미 없는 대기
-- 불필요하게 반복한 설명
-- 말실수 후 다시 말한 경우 앞의 실패한 부분
-- 장면 설명에 필요하지 않은 긴 무음
-
-구성:
-- 질문으로 시작 → 근거 장면과 설명 → 해석 → 시청자에게 질문 순서
-- 순서를 바꾸면 말의 의미가 달라지는 경우 원래 맥락 유지
-
-실제로 말하지 않은 해석이나 결론은 만들지 말고, 먼저 추천 편집본을 만들어 내가 확인할 수 있게 해줘."""
+실제로 말하지 않은 내용은 만들지 마."""
 
 GUIDELINES = {'default': DEFAULT_GUIDELINE, 'commentary': DEFAULT_GUIDELINE_COMMENTARY}
 
@@ -115,7 +102,7 @@ STYLES = {
     'commentary': {
         'name': '영화·TV·애니 해석 리뷰 (말하는 영상 + 작품 장면)', 'target': (45, 65), 'hook': 'speech', 'narration': False,
         'max_silent_visual': 3.0, 'max_shot': None, 'frame': 'auto',
-        'order': [], 'note': '말하는 흐름(질문→근거→해석→시청자 질문)을 유지하고 말실수·반복·무음만 줄입니다. 작품 장면은 직접 연결합니다.'},
+        'order': [], 'note': '심플 편집: 무음 제거 · 버벅인 부분 제거 · 가장 잘 말한 테이크만 · 말끝 보존 · 순서와 길이 그대로. 작품 장면은 직접 연결합니다.'},
     'restaurant': {
         'name': '맛집 리뷰 (짧은 컷 + 먹방 + 나레이션)', 'target': (22, 55), 'hook': 'visual', 'narration': True,
         'max_silent_visual': 3.0, 'max_shot': 4.0, 'frame': 'auto',
@@ -222,6 +209,11 @@ def parse_guideline(text, style='oneshot'):
             rules['unapplied'].append(f'{word}: 자동 적용하지 않음')
     rules['applied'] += ['준비·재촬영·반복·긴 무음 줄이기', '문장 끝 보존(말끝 여유 0.2~0.35초)']
     # 먹방·시식형에서만 쓰는 연출(완성본 1116에서 배운 것). 해석·브이로그 영상에는 적용하지 않는다.
+    if style == 'commentary':
+        # 해석 영상은 단순하게: 무음 제거 · 버벅인 부분 빼고 가장 잘 말한 테이크만 · 말끝 보존 · 순서와 길이는 그대로.
+        rules.update(tight=True, no_trim=True, hook='none', protect_silent=False)
+        rules['applied'] = [a for a in rules['applied'] if not a.startswith('목표 길이')]
+        rules['applied'] += ['문장 사이·문장 안의 무음 제거', '여러 번 말한 문장은 가장 잘 말한 한 번만', '말한 순서 그대로 · 길이 맞추려고 빼지 않음']
     food = style in ('oneshot', 'cook_mukbang', 'restaurant')
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
@@ -325,8 +317,9 @@ def split_sentences(words, duration, gap=.7, longest=12.):
                 text = ''.join(w['text'] for w in part).strip()
                 if norm(text):
                     conf = sum(float(w.get('confidence', 0)) for w in part) / len(part)
+                    pauses = [(float(a['end']), float(b['start'])) for a, b in zip(part, part[1:]) if b['start'] - a['end'] > .3]
                     result.append({'start': float(part[0]['start']), 'end': min(float(duration), float(part[-1]['end'])),
-                                   'text': text, 'confidence': round(conf, 3), **dict(zip(('quality', 'quality_notes'), take_quality(part))),
+                                   'text': text, 'confidence': round(conf, 3), 'pauses': pauses, **dict(zip(('quality', 'quality_notes'), take_quality(part))),
                                    **classify(text)})
             bucket.clear()
     for word in words:
@@ -529,6 +522,14 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
                 'visual_roles': roles[:2], 'confidence': s['confidence'], 'drop': s['drop'],
                 'review': list(s['review']), 'negated': s['negated'], 'numbers': s['numbers'],
                 'texture': s['texture'], 'mistake': s['mistake'], 'complete': s['complete']}
+        if rules.get('tight'):
+            # 문장 안의 쉼도 뺀다. 쉼 앞 단어의 말끝은 살린다(말끝 흐림 방지).
+            cuts = []
+            for a, b in s.get('pauses', []):
+                c0, c1 = a + speech_tail(envelope, a), b - pre
+                if c1 - c0 >= .12:
+                    cuts.append((c0, c1))
+            unit['pauses'] = cuts
         if s['confidence'] < .5:
             unit['review'].append('인식 신뢰도 낮음 · 원음 확인 필요')
         prod = product_for(rows, evidence, asset['id'])
@@ -536,7 +537,7 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
             unit['product'] = prod
         units.append(unit)
     spans = [(u['speech_start'], u['speech_end']) for u in units]
-    for sh in shots:
+    for sh in ([] if rules.get('tight') else shots):   # 말 위주 편집(해석 영상)은 말 없는 장면을 따로 넣지 않는다
         if sh['role'] not in rules['keep']:
             continue
         # 음성과 겹치는 부분을 빼고 남는 '말 없는' 장면 조각만 별도 단위로
@@ -652,7 +653,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         kept, overlaid, laid_units = overlay_eating(kept)
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
-    if total(kept) > target_max:
+    if total(kept) > target_max and not rules.get('no_trim'):
         order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -(u['end'] - u['start'])))
         for u in order:
             if total(kept) <= target_max:
@@ -663,7 +664,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                             'text': u['text']})
         if total(kept) > target_max:
             warnings.append(f'보존해야 할 결론·문장을 자르지 않아 목표 {target_max}초를 {total(kept) - target_max:.1f}초 넘겼어요.')
-    if total(kept) < target_min:
+    if total(kept) < target_min and not rules.get('no_trim'):
         warnings.append(f'편집본이 목표 최소 {target_min}초보다 {target_min - total(kept):.1f}초 짧아요. 원본에 쓸 만한 구간이 부족합니다(억지로 늘리지 않았어요).')
 
     # 순서: 기본은 촬영 순서(원본 업로드 순 → 시간 순). 필요한 경우에만 후킹·제품 묶기.
@@ -699,6 +700,8 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         if pieces:
             kept[0]['montage'] = pieces
             notes.append(f'후킹 멘트 아래에 제품 장면 {len(pieces)}컷을 빠르게 얹었어요(완성본 1116 방식). 화면이 맞는지 확인하세요.')
+    if rules.get('tight'):
+        kept = _cut_pauses(kept)
     clips = _merge_clips(kept, assets, rules, fps)
     review_items = [{'filename': u['filename'], 'start': u['start'], 'end': u['end'], 'role': u['role'],
                      'review': u['review'] + (u.get('product', {}).get('uncertain', []) if u.get('product', {}).get('status') == '확인 필요' else [])}
@@ -863,6 +866,23 @@ def _group_by_product(units):
     return [u for k in order for u in groups[k]], notes
 
 
+def _cut_pauses(kept):
+    out = []
+    for u in kept:
+        pieces, t = [], u['start']
+        for c0, c1 in u.get('pauses', []):
+            if u['start'] < c0 < c1 < u['end']:
+                pieces.append((t, c0))
+                t = c1
+        pieces.append((t, u['end']))
+        if len(pieces) == 1:
+            out.append(u)
+            continue
+        for k, (a, b) in enumerate(pieces):
+            out.append({**u, 'start': a, 'end': b, 'pauses': [], 'piece': k})
+    return out
+
+
 def _merge_clips(kept, assets, rules, fps):
     """연속·근접 단위를 한 클립으로 합침(0.5초 미만 공백은 자연스러운 호흡으로 유지)."""
     meta = {a['id']: a for a in assets}
@@ -895,7 +915,8 @@ def _merge_clips(kept, assets, rules, fps):
             cur = None if whole else {'asset_id': u['asset_id'], 'start': split, 'end': u['end'], 'frame': frame,
                                       'guided': {'units': [_brief(u)]}}
             continue
-        if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < .5:
+        join = .04 if rules.get('tight') else .5   # 말 위주 편집은 쉼을 남기지 않는다
+        if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < join:
             cur['end'] = max(cur['end'], u['end'])
             cur['guided']['units'].append(_brief(u))
         else:

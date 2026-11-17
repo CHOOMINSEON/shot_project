@@ -424,3 +424,26 @@ def test_food_only_effects_are_off_for_commentary_and_vlog():
         assert rules['overlay_eating'] is on and rules['hook_montage'] is on, style
     assert guided.parse_guideline(default_guideline(), 'recipe')['hook_montage']
     assert not guided.parse_guideline(default_guideline() + '\n몽타주 빼줘', 'oneshot')['hook_montage']
+
+
+def test_commentary_is_simple_tight_cut_with_best_take_and_kept_endings():
+    words = [w(1, ' 이 장면은 사실', 1.0, 2.0), w(2, ' 복선이었어요.', 2.6, 3.4),          # 문장 안 0.6초 쉼 → 빼기
+             w(3, ' 오디세우스가 돌아온 이유는', 6.0, 7.5), w(4, ' 오디세', 7.6, 7.9),       # 버벅임 → 다시 말함
+             w(5, ' 오디세우스가 돌아온 이유는 가족 때문이에요.', 10.0, 12.5),
+             w(6, ' 여러분은 어떻게 보셨나요?', 16.0, 18.0)]
+    rules = guided.parse_guideline(guided.DEFAULT_GUIDELINE_COMMENTARY, 'commentary')
+    assert rules['tight'] and rules['no_trim'] and rules['hook'] == 'none' and not rules['hook_montage']
+    a = asset(words, 30)
+    result = guided.plan([a], rules, {'v': []}, {})
+    clips = result['clips']
+    timeline.validate_state({'clips': clips, 'fps': 30, 'quality': 'standard', 'protections': []}, {'v': a})
+    covered = lambda t: any(c['start'] <= t < c['end'] for c in clips)
+    assert covered(1.5) and covered(3.0) and covered(11) and covered(17)
+    assert not covered(2.35)                   # 문장 안 무음 제거
+    assert any('무음 제거' in a for a in rules['applied'])
+    assert not covered(5.0) and not covered(14.5)   # 문장 사이 무음 제거
+    assert not covered(6.5)                    # 버벅인 첫 시도 제거, 다시 말한 쪽만
+    for end in (3.4, 12.5, 18.0):              # 말끝 보존(0.2초 이상 여유)
+        assert covered(end + .18), end
+    starts = [c['start'] for c in clips]
+    assert starts == sorted(starts)            # 말한 순서 그대로
