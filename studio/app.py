@@ -921,6 +921,17 @@ def apply_plan(ident: str, body: ApplyPlan):
     return save(ident, body.revision, state, current['name'])
 
 
+@app.get('/api/projects/{ident}/overlays.srt')
+def download_overlay_srt(ident: str):
+    """지시문의 자막·표기(유료광고 포함·강조 자막·이름 표시) 전용 SRT."""
+    current = project(ident)
+    items = guided.overlay_items((current['state'].get('guided') or {}).get('overlays'), current['state'].get('clips', []))
+    if not items:
+        raise HTTPException(404, '지시문에 자막·표기 항목이 없어요.')
+    return Response(timeline.srt(items, current['duration']), media_type='application/x-subrip; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename="iyoring_review_marks.srt"'})
+
+
 @app.get('/api/projects/{ident}/captions.srt')
 def download_srt(ident: str):
     current = project(ident)

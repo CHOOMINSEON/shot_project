@@ -447,3 +447,81 @@ def test_commentary_is_simple_tight_cut_with_best_take_and_kept_endings():
         assert covered(end + .18), end
     starts = [c['start'] for c in clips]
     assert starts == sorted(starts)            # 말한 순서 그대로
+
+
+KK = """업로드한 KK뷰티페스타·KGMA 현장 영상에서 중요한 부분을 골라 세로 9:16 숏폼으로 편집해줘.
+
+목표 길이는 45~60초로 하되, 현장 멘트나 문장 끝을 자르면서 억지로 길이를 맞추지 마.
+
+남길 장면 (이 순서로 배치):
+1. 첫 장면: 팔로우 이벤트로 받은 물건을 전부 펼친 샷. 본품 패키지 앞면이 보이는 구간을 우선으로 골라줘.
+2. KK뷰티페스타 캡슐 뽑기 부스 전경과 뽑기 차례를 기다리는 장면
+3. 부스 진행자가 외국인 관객에게 말을 거는 장면. 현장음을 그대로 살리고 웃긴 한마디가 끝날 때까지 자르지 마.
+4. 1분 캡슐 뽑기: 캡슐 뽑는 손과 4등·5등 결과가 나오는 장면
+5. 4등 레몬약과와 5등 브라우니를 손에 들고 보여주는 컷. 먹는 장면은 없으니 찾지 말고 들고 있는 컷만 써.
+6. KGMA 현장: 다영, 영케이, 리센느, 트리플에스 무대를 각각 짧게
+7. 장면 전환용 풍경 컷이 있으면 짧게 넣고, 없으면 건너뛰어
+마지막: 사은품 전체 샷에 이어 본품 클로즈업
+
+줄일 부분:
+- 촬영 준비, 카메라 조정, 의미 없는 대기
+- 말실수 후 다시 말한 경우 앞의 실패한 부분
+
+단, 사은품·본품 클로즈업, 캡슐 결과, 무대 장면은 음성이 없다는 이유만으로 삭제하지 마.
+
+자막·표기:
+- 자막은 영상에서 실제로 말한 내용 그대로 달기. 현장 멘트에도 자막 달기.
+- 화면 상단에 '유료광고 포함'을 처음부터 끝까지 표시
+- KK뷰티페스타 부스가 처음 나올 때 'KK뷰티페스타', KGMA 현장이 처음 나올 때 'KGMA' 표시
+- 첫 장면 강조 자막: 본품까지 준다고?
+
+구성:
+- KK뷰티페스타 장면과 KGMA 장면을 섞지 말고 행사별로 묶기
+- 마지막은 본품 클로즈업에서 끝내기
+
+실제로 말하지 않은 평가나 결론은 만들지 말고, 먼저 추천 편집본을 만들어 내가 확인할 수 있게 해줘."""
+
+
+def test_instruction_sheet_scene_list_is_parsed():
+    rules = guided.parse_guideline(KK, 'vlog')
+    sc = rules['scenes']
+    assert len(sc) == 8 and sc[0]['first'] and sc[-1]['last']
+    assert sc[2]['live'] and not sc[0]['live']
+    assert sc[4]['absent'] == ['eating'] and 'eating' not in sc[4]['roles']
+    assert sc[5]['count'] == 4 and sc[5]['short']
+    assert sc[6]['optional'] and not sc[1]['optional']
+    assert '진행자' in sc[2]['terms'] and '외국인' in sc[2]['terms']
+    kinds = {o['kind']: o['text'] for o in rules['overlays']}
+    assert kinds['fixed'] == '유료광고 포함' and kinds['emphasis'] == '본품까지 준다고?'
+    assert {o['text'] for o in rules['overlays'] if o['kind'] == 'name'} == {'KK뷰티페스타', 'KGMA'}
+    assert rules['target'] == (45, 60) and rules['hook'] == 'none'
+
+
+def test_scene_list_orders_edit_and_respects_live_absent_and_marks():
+    words = [w(1, ' 진행자가 외국인 관객에게 어디서 왔어요 하고 물어봤어요.', 30, 33),
+             w(2, ' 저 미국에서 왔어요 하하.', 33.3, 35),                  # 이어지는 현장 멘트 → 함께
+             w(3, ' 여기 KK뷰티페스타 캡슐 뽑기 부스예요.', 10, 13),
+             w(4, ' 본품 패키지까지 전부 펼쳐 봤어요.', 2, 5),
+             w(5, ' 레몬약과 먹는 중이에요 맛있어요.', 70, 72),             # 먹는 장면: 5번 장면에 쓰면 안 됨
+             w(6, ' 4등 레몬약과랑 5등 브라우니를 들고 보여드릴게요.', 60, 63),
+             w(7, ' 1분 캡슐 뽑기 결과 4등 5등 나왔어요.', 50, 53),
+             w(8, ' 마지막으로 사은품 전체랑 본품 클로즈업이에요.', 90, 93)]
+    rules = guided.parse_guideline(KK, 'vlog')
+    a = asset(words, 100)
+    result = guided.plan([a], rules, {'v': []}, {})
+    texts = [u['text'].strip() for u in result['units']]
+    order = [t for t in texts]
+    assert order.index('본품 패키지까지 전부 펼쳐 봤어요.') == 0                      # 첫 장면
+    assert order[-1] == '마지막으로 사은품 전체랑 본품 클로즈업이에요.'                  # 마지막
+    i = order.index('진행자가 외국인 관객에게 어디서 왔어요 하고 물어봤어요.')
+    assert order[i + 1] == '저 미국에서 왔어요 하하.'                                    # 현장 멘트 끝까지
+    assert order.index('여기 KK뷰티페스타 캡슐 뽑기 부스예요.') < i < order.index('1분 캡슐 뽑기 결과 4등 5등 나왔어요.')
+    assert '레몬약과 먹는 중이에요 맛있어요.' not in texts                               # '먹는 장면은 없으니 찾지 마'
+    assert any('KGMA' in w and '찾지 못했어요' in w for w in result['warnings'])          # 6번은 원본에 없음 → 알림
+    assert not any('풍경' in w for w in result['warnings'])                               # 선택 장면은 조용히 건너뜀
+    marks = guided.overlay_items(result['overlays'], result['clips'])
+    by = {m['text']: m for m in marks}
+    assert by['유료광고 포함']['start'] == 0 and by['유료광고 포함']['end'] > 10
+    assert by['본품까지 준다고?']['start'] == 0
+    assert 'KK뷰티페스타' in by and by['KK뷰티페스타']['start'] > 0
+    assert any('KGMA' in w and '표기' in w for w in result['warnings'])                  # 위치 못 찾은 표기는 알림

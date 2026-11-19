@@ -47,7 +47,8 @@ function drawGuided(){
  else if(applied)$('guided-status').textContent=`${r.style_name} · 편집본 ${clock(r.seconds,true)} (목표 ${r.target[0]}~${r.target[1]}초)`+(r.notice?'\n'+r.notice:'');
  else if(r?.notice)$('guided-status').textContent=r.notice;
  else $('guided-status').textContent=ready?'편집 지침을 확인하고 자동 편집을 시작하세요. 음성 모델 준비 중이면 장면 분석만 먼저 사용합니다.':'왼쪽에서 촬영 원본을 올려주세요. 프로젝트는 자동으로 만들어져요.';
- $('guided-downloads').innerHTML=exportable?(latestExport.result.files||[]).filter(f=>['video','archive','subtitle'].includes(f.type)).map(f=>`<a class="button ${f.type==='video'?'primary':'secondary'}" href="/api/exports/${latestExport.id}/${encodeURIComponent(f.name)}">${{video:'MP4',archive:'ZIP(MP4·SRT·컷 목록)',subtitle:'SRT'}[f.type]} 다운로드 · ${bytes(f.size)}</a>`).join(''):'';
+ $('guided-downloads').innerHTML=exportable?(latestExport.result.files||[]).filter(f=>['video','archive','subtitle'].includes(f.type)).map(f=>`<a class="button ${f.type==='video'?'primary':'secondary'}" href="/api/exports/${latestExport.id}/${encodeURIComponent(f.name)}">${f.type==='subtitle'&&f.name.includes('표기')?'표기(유료광고·강조 자막) SRT':{video:'MP4',archive:'ZIP(MP4·SRT·컷 목록)',subtitle:'SRT'}[f.type]} 다운로드 · ${bytes(f.size)}</a>`).join(''):'';
+ if(!exportable&&project?.state.guided?.overlays?.length)$('guided-downloads').innerHTML=`<a class="button secondary" href="/api/projects/${project.id}/overlays.srt">표기(유료광고·강조 자막) SRT 다운로드</a>`;
  const key=[latestGuided?.id,latestGuided?.updated,project?.revision].join(':');
  if(key!==guidedRenderKey){guidedRenderKey=key;$('guided-report').innerHTML=r?guidedReport(r):'';}
 }
@@ -101,7 +102,7 @@ action('guided-download',async()=>{
  const response=await api('/projects/'+project.id+'/render',{method:'POST',body:JSON.stringify({revision:project.revision,mode:'full',preview:false,filename:'최종_편집본'})});
  finalDownloading=response.job_id;drawGuided();await poll();toast('최종 MP4를 만들고 있습니다. 완료되면 다운로드를 시작합니다.');
 });
-action('guided-captions',()=>{const box=$('advanced-edit');box.open=true;document.querySelector('[data-tab="captions"]')?.click();box.scrollIntoView({behavior:'smooth'});});
+action('guided-captions',()=>{const box=$('advanced-edit'),panel=box.closest('section');if(panel){panel.hidden=false;panel.style.display='';}box.open=true;document.querySelector('[data-tab="captions"]')?.click();box.scrollIntoView({behavior:'smooth'});});
 action('guided-undo',async()=>{
  await saveQueue;const old=clone(project.state);
  project=await api('/projects/'+project.id+'/auto-cut/'+latestGuided.id+'/undo',{method:'POST',body:JSON.stringify({revision:project.revision})});

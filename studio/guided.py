@@ -94,9 +94,10 @@ STYLES = {
         'order': ['eating', 'cooking', 'eating'],
         'note': '완성 장면/얼굴 후킹으로 시작하고 조리 컷을 순서대로 잇습니다.'},
     'vlog': {
-        'name': '브이로그 (짧은 컷 + 나레이션)', 'target': (20, 45), 'hook': 'visual', 'narration': True,
-        'max_silent_visual': 2.5, 'max_shot': 3.0, 'frame': 'auto',
-        'order': [], 'note': '먹는 장면이 없어도 됩니다. 컷은 짧게 유지합니다.'},
+        # 지침서 '현장·체험형'(김장 완성본 67초): 60~70초 고정, 컷 1~2초, 현장 멘트는 가장 센 한두 마디만, 마지막은 단체 장면.
+        'name': '브이로그·현장 체험 (짧은 컷 + 현장 멘트)', 'target': (60, 70), 'hook': 'visual', 'narration': True,
+        'max_silent_visual': 2.0, 'max_shot': 2.0, 'frame': 'auto',
+        'order': [], 'note': '60~70초 고정. 1~2초 컷을 이어 붙이고, 같은 동작은 한 컷만, 현장 멘트는 가장 센 한두 마디만 남깁니다.'},
     # 채널 '이요저장소'(영화·TV·애니 해석) 쇼츠 1개(60초)에서 파악: 얼굴로 말하는 영상 + 작품 장면 겹침, 4구간(12/18/14/16초),
     # 질문형 제목, 마지막에 시청자 질문. 작품 장면 자동 인식은 아직 없어 장면 연결은 직접 합니다.
     'commentary': {
@@ -143,6 +144,138 @@ ORDER_WORDS = [('intro', r'제품 소개|소개'), ('opening', r'개봉'), ('cro
 UNSUPPORTED = ['음악', '효과음', '전환 효과', '얼굴 추적', '줌인', '자막 스타일', '속도', '배속']
 
 
+SCENE_STOP = {'장면', '화면', '구간', '우선으로', '골라줘', '그대로', '살리고', '자르지', '끝날', '때까지', '현장음', '바로',
+              '다음', '넘어가', '각각', '짧게', '없으니', '찾지', '말고', '있는', '보여주는', '나오는', '하는', '이어', '첫', '마지막',
+              '있으면', '넣고', '없으면', '건너뛰어', '한마디', '한마디가', '끝나면', '이어서', '전부', '각', '모습', '써'}
+PARTICLE = re.compile(r'(으로|에게|에서|까지|부터|이랑|하고|이나|을|를|이|가|은|는|에|의|와|과|로|도|만)$')
+
+
+def _scene_terms(text):
+    terms = []
+    for tok in re.findall(r'[가-힣A-Za-z0-9]{2,}', text):
+        stem = PARTICLE.sub('', tok)
+        if len(stem) >= 2 and stem not in SCENE_STOP and tok not in SCENE_STOP:
+            terms.append(stem)
+    return list(dict.fromkeys(terms))
+
+
+def _parse_scene_line(line):
+    """'3. 진행자가 … 장면. 현장음을 그대로 살리고 …' 같은 번호 장면 한 줄 → 찾을 장면 요청."""
+    m = re.match(r'^(?:(\d+)\s*[.)]|(마지막)\s*[:：])\s*(.+)$', line)
+    if not m:
+        return None
+    body = m[3].strip()
+    first = bool(re.match(r'첫\s*장면\s*[:：]', body))
+    body = re.sub(r'^첫\s*장면\s*[:：]\s*', '', body)
+    absent_part = ' '.join(re.findall(r'([^.,]*?)없으니\s*찾지', body))
+    main = re.sub(r'[^.]*?없으니\s*찾지\s*(말고|마\.?)', '', body)
+    main = re.sub(r'(자르|삭제하)지\s*마', '', main)
+    absent = [k for k, p in KEEP_WORDS if re.search(p, absent_part)]
+    roles = [k for k, p in KEEP_WORDS if re.search(p, main) and k not in absent]
+    names = [n.strip() for n in re.split(r'[,，]', re.split(r'무대|공연', body)[0]) if n.strip()] if '각각' in body else []
+    return {'n': int(m[1]) if m[1] else 999, 'text': body, 'first': first, 'last': bool(m[2]),
+            'live': bool(re.search(r'현장음.*(살리|그대로)|끝날\s*때까지\s*자르지', body)),
+            'optional': bool(re.search(r'있으면.*(건너뛰|빼)', body)),
+            'short': bool(re.search(r'짧게|1\s*~\s*2\s*초', body)),
+            'count': max(1, min(6, len(names))) if names else 1,
+            'absent': absent, 'roles': roles, 'terms': _scene_terms(main)}
+
+
+def _parse_caption_line(line, rules):
+    """자막·표기 항목 → 별도 표기(고정 문구·강조 자막·이름 표시). 실제 자막은 말한 그대로라 여기서 만들지 않는다."""
+    ov = rules.setdefault('overlays', [])
+    if m := re.search(r'(상단|하단|가운데|위|아래)[^\']*[\'‘"“]([^\'’"”]{1,30})[\'’"”][^\n]*처음부터\s*끝까지', line):
+        ov.append({'kind': 'fixed', 'text': m[2], 'position': m[1]})
+    elif m := re.search(r'강조\s*자막\s*[:：]\s*(.+)$', line):
+        text = m[1].strip().strip('\'"‘’“”')
+        ov.append({'kind': 'emphasis', 'text': text[:14], 'position': '가운데'})
+    else:
+        for subject, label in re.findall(r'([^,]+?)(?:이|가)?\s*처음\s*나올\s*때\s*[\'‘"“]([^\'’"”]{1,30})[\'’"”]', line):
+            ov.append({'kind': 'name', 'text': label, 'subject': _scene_terms(subject), 'position': '상단'})
+
+
+def assign_scenes(units, rules, hits=None):
+    """지시문의 '남길 장면' 순서대로 각 장면에 맞는 구간을 고른다.
+
+    점수: 장면 설명의 단어가 실제 발화에 나오는 정도 + 장면 역할(포장·개봉·시식 등) + 화면 검색(CLIP·OCR) 후보와 겹침.
+    '현장음 살리기'는 이어지는 발화까지 끝까지, '짧게'는 말 없는 컷을 2초 이내로, '없으니 찾지 마'는 그 역할을 제외한다.
+    반환: (배치된 단위 목록, 경고 목록, 찾은 장면 수)
+    """
+    hits = hits or {}
+    scenes = sorted(rules['scenes'], key=lambda s: (0 if s['first'] else 2 if s['last'] else 1, s['n']))
+    used, out, warn, found = set(), [], [], 0
+    for k, sc in enumerate(scenes):
+        idx = rules['scenes'].index(sc)
+        scored = []
+        for u in units:
+            if id(u) in used or u['kind'] == 'whole':
+                continue
+            roles = set(u['visual_roles'] if u['kind'] == 'speech' else [u['role']]) | set(u['labels'])
+            if roles & set(sc['absent']):
+                continue
+            text = canonical_ko(u.get('text', '') + ' ' + ((u.get('product') or {}).get('name') or ''))
+            hit_terms = sum(t in text or (len(t) >= 3 and t[:-1] in text) for t in sc['terms'])
+            s = min(1., hit_terms / min(4, len(sc['terms']))) if sc['terms'] else 0
+            s += .8 if roles & set(sc['roles']) else 0
+            for h in hits.get(idx, []):
+                if h['asset_id'] == u['asset_id'] and h['start'] < u['end'] and h['end'] > u['start']:
+                    s = max(s, s + (1.2 if h.get('exact') else .5))
+            if sc['live'] and u['kind'] != 'speech':
+                s -= .5
+            if s >= .5:
+                scored.append((s, u))
+        scored.sort(key=lambda x: -x[0])
+        picked = []
+        for s, u in scored:
+            if all(abs(u['start'] - p['start']) >= 10 or u['asset_id'] != p['asset_id'] for p in picked):
+                picked.append(u)
+            if len(picked) == sc['count']:
+                break
+        if not picked:
+            if not sc['optional']:
+                warn.append(f'남길 장면 {sc["n"] if sc["n"] < 999 else "마지막"}: "{sc["text"][:40]}" 에 맞는 구간을 찾지 못했어요. 비슷한 장면으로 대신하지 않았어요.')
+            continue
+        found += 1
+        if sc['live']:
+            # 현장 멘트는 끝날 때까지: 바로 이어지는 발화를 함께 넣는다.
+            u = picked[0]
+            for v in sorted((x for x in units if x['asset_id'] == u['asset_id'] and x['kind'] == 'speech' and x['start'] >= u['end'] - .01), key=lambda x: x['start'])[:3]:
+                if v['start'] - max(p['end'] for p in picked) < .8 and id(v) not in used and v not in picked:
+                    picked.append(v)
+                else:
+                    break
+        for u in sorted(picked, key=lambda x: (x['asset_id'], x['start'])):
+            used.add(id(u))
+            if (sc['short'] or sc['count'] > 1) and u['kind'] != 'speech' and u['end'] - u['start'] > (2. if sc['short'] else 3.):
+                u = {**u, 'end': u['start'] + (2. if sc['short'] else 3.)}
+            out.append({**u, 'scene': sc['n']})
+    return out, warn, found
+
+
+def canonical_ko(text):
+    return re.sub(r'[^가-힣A-Za-z0-9]', '', text or '')
+
+
+def overlay_items(overlays, clips):
+    """표기(고정 문구·강조 자막·이름 표시)를 현재 타임라인 시간으로 바꾼다. 편집을 고쳐도 원본 위치 기준으로 다시 계산된다."""
+    pos, starts = 0., []
+    for c in clips:
+        starts.append(pos)
+        pos += c['end'] - c['start']
+    items = []
+    for o in overlays or []:
+        if o['kind'] == 'fixed':
+            items.append({'text': o['text'], 'start': 0., 'end': pos})
+            continue
+        for c, t0 in zip(clips, starts):
+            a = o.get('anchor')
+            if a and c['asset_id'] == a['asset_id'] and c['start'] - .01 <= a['src'] < c['end']:
+                t = t0 + max(0., a['src'] - c['start'])
+                items.append({'text': o['text'], 'start': t, 'end': min(pos, t + (2.5 if o['kind'] == 'emphasis' else 2.))})
+                break
+    return sorted(items, key=lambda i: i['start'])
+
+
 def parse_guideline(text, style='oneshot'):
     """지침 문장 → 구조화 규칙. 해석하지 못한 항목은 `unapplied`에 남긴다."""
     base = STYLES.get(style, STYLES['oneshot'])
@@ -155,9 +288,16 @@ def parse_guideline(text, style='oneshot'):
         line = raw.strip()
         if not line:
             continue
-        head = re.match(r'^(남길 장면|줄일 부분|구성)\s*:', line)
+        head = re.match(r'^(남길 장면|줄일 부분|구성|자막\s*·?\s*표기)\s*(\([^)]*\))?\s*:', line)
         if head:
-            section = {'남길 장면': 'keep', '줄일 부분': 'drop', '구성': 'order'}[head[1]]
+            section = {'남길 장면': 'keep', '줄일 부분': 'drop', '구성': 'order'}.get(head[1], 'caption')
+            continue
+        if section == 'caption':
+            _parse_caption_line(line, rules)
+            continue
+        if section == 'keep' and (scene := _parse_scene_line(line)):
+            rules.setdefault('scenes', []).append(scene)
+            rules['keep'] |= set(scene['roles'])
             continue
         if re.search(r'삭제하지\s*마', line):
             # '단, 단면·개봉·시식은 … 삭제하지 마' 줄은 줄일 부분이 아니라 보존 목록이다.
@@ -207,6 +347,11 @@ def parse_guideline(text, style='oneshot'):
     for word in UNSUPPORTED:
         if word in text:
             rules['unapplied'].append(f'{word}: 자동 적용하지 않음')
+    if rules.get('scenes'):
+        rules['applied'].append(f'남길 장면 {len(rules["scenes"])}개를 지시문 순서대로 배치')
+        rules['hook'] = 'none'   # 첫 장면은 지시문이 정한다
+    if rules.get('overlays'):
+        rules['applied'].append('자막·표기 ' + ' · '.join(o['text'] for o in rules['overlays']) + ' (별도 표기 SRT)')
     rules['applied'] += ['준비·재촬영·반복·긴 무음 줄이기', '문장 끝 보존(말끝 여유 0.2~0.35초)']
     # 먹방·시식형에서만 쓰는 연출(완성본 1116에서 배운 것). 해석·브이로그 영상에는 적용하지 않는다.
     if style == 'commentary':
@@ -649,11 +794,21 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     warnings = []
     hook_unit = None
     laid_units = []
-    if rules.get('overlay_eating', True):
+    scene_mode = False
+    if rules.get('scenes'):
+        placed, scene_warn, found = assign_scenes(kept, rules, rules.get('scene_hits'))
+        if found and found >= max(1, len(rules['scenes']) // 2):
+            kept, scene_mode = placed, True
+            warnings += scene_warn
+            notes.append(f'지시문의 남길 장면 {len(rules["scenes"])}개 중 {found}개를 찾아 그 순서대로 배치했어요.')
+        else:
+            warnings.append('지시문의 남길 장면을 절반 이상 찾지 못해 일반 자동 편집으로 만들었어요. 장면 묘사를 더 구체적으로 써 주세요.')
+            warnings += scene_warn
+    if rules.get('overlay_eating', True) and not scene_mode:
         kept, overlaid, laid_units = overlay_eating(kept)
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
-    if total(kept) > target_max and not rules.get('no_trim'):
+    if total(kept) > target_max and not rules.get('no_trim') and not scene_mode:
         order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -(u['end'] - u['start'])))
         for u in order:
             if total(kept) <= target_max:
@@ -664,14 +819,17 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                             'text': u['text']})
         if total(kept) > target_max:
             warnings.append(f'보존해야 할 결론·문장을 자르지 않아 목표 {target_max}초를 {total(kept) - target_max:.1f}초 넘겼어요.')
+    if scene_mode and total(kept) > target_max:
+        warnings.append(f'지시문 장면을 모두 넣어 목표 {target_max}초를 {total(kept) - target_max:.1f}초 넘겼어요. 먼저 줄일 장면을 확인하세요.')
     if total(kept) < target_min and not rules.get('no_trim'):
         warnings.append(f'편집본이 목표 최소 {target_min}초보다 {target_min - total(kept):.1f}초 짧아요. 원본에 쓸 만한 구간이 부족합니다(억지로 늘리지 않았어요).')
 
     # 순서: 기본은 촬영 순서(원본 업로드 순 → 시간 순). 필요한 경우에만 후킹·제품 묶기.
     asset_order = {a['id']: i for i, a in enumerate(assets)}
-    kept.sort(key=lambda u: (asset_order.get(u['asset_id'], 0), u['start']))
+    if not scene_mode:
+        kept.sort(key=lambda u: (asset_order.get(u['asset_id'], 0), u['start']))
     moved = []
-    if rules['hook'] == 'speech' and len(kept) > 3:
+    if rules['hook'] == 'speech' and len(kept) > 3 and not scene_mode:
         hook_unit = _pick_hook(kept)
         if hook_unit:
             idx = kept.index(hook_unit)
@@ -680,7 +838,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                 moved.append({'text': hook_unit['text'], 'reason': '실제 발화의 핵심 질문·평가로 시작(문장 단독으로 의미 유지 확인)'})
     elif rules['hook'] == 'speech' or rules['hook'] == 'visual':
         pass
-    if rules['group_products']:
+    if rules['group_products'] and not scene_mode:
         kept, group_notes = _group_by_product(kept)
         warnings += group_notes
 
@@ -694,7 +852,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'cook_mukbang', 'restaurant'):
         missing.append('먹는 장면 후보를 찾지 못했어요.')
 
-    if rules.get('hook_montage', True) and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
+    if rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
         shots = build_shots(frames_by_asset.get(kept[0]['asset_id'], []))
         pieces = hook_montage(kept[0], shots, fps)
         if pieces:
@@ -703,13 +861,29 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     if rules.get('tight'):
         kept = _cut_pauses(kept)
     clips = _merge_clips(kept, assets, rules, fps)
+    overlays = []
+    for o in rules.get('overlays', []):
+        o = dict(o)
+        if o['kind'] == 'emphasis' and clips:
+            o['anchor'] = {'asset_id': clips[0]['asset_id'], 'src': clips[0]['start']}
+        elif o['kind'] == 'name':
+            want = o.get('subject', [])[:1]   # '부스'·'현장' 같은 일반 단어 말고 이름 자체로 찾는다
+            hit = next((u for u in kept if want and any(t in canonical_ko(u.get('text', '')) for t in want)), None)
+            if not hit and scene_mode:
+                sc = next((s for s in rules['scenes'] if any(t in s['text'] for t in want)), None)
+                hit = next((u for u in kept if sc and u.get('scene') == sc['n']), None)
+            if hit:
+                o['anchor'] = {'asset_id': hit['asset_id'], 'src': hit['start']}
+            else:
+                warnings.append(f'표기 "{o["text"]}"를 넣을 위치를 찾지 못했어요. 캡컷에서 직접 넣어 주세요.')
+        overlays.append(o)
     review_items = [{'filename': u['filename'], 'start': u['start'], 'end': u['end'], 'role': u['role'],
                      'review': u['review'] + (u.get('product', {}).get('uncertain', []) if u.get('product', {}).get('status') == '확인 필요' else [])}
                     for u in kept if u['review'] or u.get('product', {}).get('status') == '확인 필요']
     return {'clips': clips, 'units': [_public(u) for u in kept] + [_public(u) for u in laid_units], 'removed': sorted(removed, key=lambda r: (r['filename'], r['start'])),
             'moved': moved, 'warnings': warnings + notes, 'missing': missing, 'review': review_items,
             'seconds': round(total(kept), 3), 'target': list(rules['target']), 'style': rules['style'],
-            'applied': rules['applied'], 'unapplied': rules['unapplied']}
+            'applied': rules['applied'], 'unapplied': rules['unapplied'], 'overlays': overlays}
 
 
 def _public(u):

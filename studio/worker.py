@@ -272,6 +272,12 @@ def render(ident, payload):
             file_list.append({'name': name, 'size': (target / name).stat().st_size, 'type': 'manifest'})
         atomic_json(target / 'edit-list.json', manifest)
         file_list.append({'name': 'edit-list.json', 'size': (target / 'edit-list.json').stat().st_size, 'type': 'manifest'})
+        overlay = guided.overlay_items((state.get('guided') or {}).get('overlays'), state['clips'])
+        if overlay:
+            # 지시문 '자막·표기'(유료광고 포함·강조 자막·이름 표시)는 말 자막과 섞이지 않게 따로 낸다.
+            marks = target / f'{base}_표기.srt'
+            marks.write_text(timeline.srt(timeline.scale_captions(overlay, speed), total / speed), encoding='utf-8')
+            file_list.append({'name': marks.name, 'size': marks.stat().st_size, 'type': 'subtitle'})
         if len(groups) > 1 and items:
             combined = target / f'{base}_전체연결용.srt'
             combined.write_text(timeline.srt(timeline.scale_captions(items, speed), total / speed), encoding='utf-8')
@@ -540,6 +546,17 @@ def guided_edit(ident, payload):
             style, confidence, reasons = guided.detect_style(list(assets.values()), frames_by_asset)
             detected = {'style': style, 'confidence': confidence, 'reasons': reasons}
         rules = guided.parse_guideline(payload['guideline'], style)
+        if rules.get('scenes') and scenes.records:
+            # 지시문의 '남길 장면'마다 화면 검색(CLIP·OCR)으로 후보를 찾아 둔다.
+            rules['scene_hits'] = {}
+            for i, sc in enumerate(rules['scenes']):
+                check_cancel(ident)
+                try:
+                    found = scenes.query(sc['text'])
+                except Exception:
+                    continue
+                rules['scene_hits'][i] = [{'asset_id': h['asset_id'], 'start': h['start'], 'end': h['end'], 'exact': True} for h in found['exact']] + \
+                                         [{'asset_id': h['asset_id'], 'start': h['start'], 'end': h['end'], 'exact': False} for h in found['supporting']]
         if payload.get('frame') in ('blur', 'fill', 'fit'):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
