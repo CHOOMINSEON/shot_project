@@ -169,8 +169,22 @@ async function poll(){if(!project||$('login-dialog').open)return;const id=projec
   if(refresh&&!saving){const current=await api('/projects/'+id);if(project.id!==id)return;if(completedAuto&&current.revision===completedAuto.result.revision)remember(project.state);project=current;if(completedAuto){selected=0;rendered=null;currentSource=null;}draw();if(completedAuto?.status==='completed'&&completedAuto.result.render_signature===project.render_signature){$(completedAuto.kind==='guided_edit'?'guided-play':completedAuto.kind==='script_edit'?'script-play':'quick-play').click();toast(completedAuto.kind==='guided_edit'?'지침에 따라 추천 편집본을 만들었어요. 삭제한 구간과 확인 필요 항목을 확인해 주세요.':completedAuto.kind==='script_edit'?'대본 순서로 구간을 연결했어요. 찾지 못한 대사와 실제 장면을 확인해 주세요.':'무음 컷을 적용했어요. 편집본을 확인하고 고화질 MP4를 저장해 주세요.');}}
   drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();
 }
-async function linkLocal(paths){paths=paths.map(p=>p.trim().replace(/^"|"$/g,'')).filter(Boolean);if(!paths.length)return;if(!project)throw Error('먼저 프로젝트를 만들어 주세요.');await api('/projects/'+project.id+'/local-files',{method:'POST',body:JSON.stringify({paths})});toast(paths.length+'개 파일을 연결했어요. 영상 정보를 확인하고 있어요.');project=await api('/projects/'+project.id);draw();await poll();}
-bind('local-pick','click',async()=>{const r=await api('/local-pick',{method:'POST'});await linkLocal(r.paths||[]);});
+async function linkLocal(paths){paths=paths.map(p=>p.trim().replace(/^"|"$/g,'')).filter(Boolean);if(!paths.length)return;if(!project){const name=(paths[0].split(/[\\/]/).pop()||'새 프로젝트').replace(/\.[^.]+$/,'').slice(0,60);const p=await api('/projects',{method:'POST',body:JSON.stringify({name})});await loadProjects(p.id);}await api('/projects/'+project.id+'/local-files',{method:'POST',body:JSON.stringify({paths})});toast(paths.length+'개 파일을 연결했어요. 영상 정보를 확인하고 있어요.');project=await api('/projects/'+project.id);draw();await poll();}
+let lbPath='',lbPicked=new Set();
+const lbEsc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function lbOpen(path){const r=await api('/local-browse?path='+encodeURIComponent(path||''));lbPath=r.path;lbPicked=new Set();$('lb-path').textContent=r.path||'내 PC';$('lb-up').disabled=!r.path;$('lb-up').dataset.to=r.parent||'';
+ const row=(d,icon)=>`<button class="lb-item" data-dir="${lbEsc(d.path)}">${icon}<span>${lbEsc(d.name)}</span></button>`;
+ let h='';if(r.places.length)h+='<div class="lb-head">바로가기</div>'+r.places.map(d=>row(d,'⭐')).join('')+'<div class="lb-head">드라이브</div>';
+ h+=r.dirs.map(d=>row(d,'📁')).join('');
+ h+=r.files.map(f=>`<label class="lb-item"><input type="checkbox" data-file="${lbEsc(f.path)}"><span>🎬 ${lbEsc(f.name)}</span><small>${(f.size/1048576).toFixed(0)}MB</small></label>`).join('');
+ if(r.path&&!r.dirs.length&&!r.files.length)h='<p class="muted">이 폴더에는 영상·오디오 파일이 없어요.</p>';
+ $('lb-list').innerHTML=h;$('lb-link').disabled=true;$('lb-link').textContent='선택한 영상 연결';}
+bind('local-pick','click',async()=>{$('local-browser').classList.remove('hidden');await lbOpen('');});
+bind('lb-close','click',()=>$('local-browser').classList.add('hidden'));
+bind('lb-up','click',()=>lbOpen($('lb-up').dataset.to));
+bind('lb-list','click',async e=>{const d=e.target.closest('[data-dir]');if(d){await lbOpen(d.dataset.dir);}});
+bind('lb-list','change',e=>{const f=e.target.dataset.file;if(!f)return;e.target.checked?lbPicked.add(f):lbPicked.delete(f);$('lb-link').disabled=!lbPicked.size;$('lb-link').textContent=lbPicked.size?`선택한 영상 ${lbPicked.size}개 연결`:'선택한 영상 연결';});
+bind('lb-link','click',async()=>{await linkLocal([...lbPicked]);$('local-browser').classList.add('hidden');});
 bind('local-add','click',async()=>{await linkLocal($('local-paths').value.split('\n'));$('local-paths').value='';});
 bind('jobs-cleanup','click',async()=>{const r=await api('/jobs/cleanup',{method:'POST'});toast(`작업을 모두 멈추고 지난 기록 ${r.cleared}개를 정리했어요.`);await poll();});
 bind('jobs','click',async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.cancelJob)await api('/jobs/'+b.dataset.cancelJob+'/cancel',{method:'POST'});if(b.dataset.retryJob)await api('/jobs/'+b.dataset.retryJob+'/retry',{method:'POST'});if(b.dataset.cleanJob)await api('/exports/'+b.dataset.cleanJob,{method:'DELETE'});if(b.dataset.previewJob){if(b.dataset.signature!==project.render_signature)throw Error('이 미리보기는 이전 컷 버전이에요. 최신 렌더 미리보기를 만들어 주세요.');rendered=b.dataset.previewJob;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(b.dataset.file)+'?inline=true',0,true);$('preview-label').textContent='렌더 미리보기 · 최종 출력과 같은 컷·화면·색 변환';applyFrame();}await poll();});

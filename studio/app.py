@@ -382,6 +382,45 @@ def desktop_only(request):
         raise HTTPException(403, 'PC 파일 바로 연결은 데스크톱 앱에서만 쓸 수 있어요.')
 
 
+@app.get('/api/local-browse')
+def local_browse(request: Request, path: str = ''):
+    """프로그램 화면 안에서 PC 폴더를 둘러본다(Windows 파일 선택 창이 뒤에 숨거나 막히는 문제를 피하려고).
+
+    path가 비면 바로가기(바탕화면·다운로드·동영상·문서)와 드라이브 목록을 준다. 영상·오디오 파일과 폴더만 보여준다.
+    """
+    desktop_only(request)
+    if not path:
+        home = Path.home()
+        places = [{'name': label, 'path': str(home / folder)} for label, folder in
+                  (('바탕화면', 'Desktop'), ('다운로드', 'Downloads'), ('동영상', 'Videos'), ('문서', 'Documents'), ('사진', 'Pictures'))
+                  if (home / folder).is_dir()]
+        drives = [f'{c}:\\' for c in 'CDEFGHIJKLMNOPQRSTUVWXYZ' if os.name == 'nt' and os.path.exists(f'{c}:\\')] or ['/']
+        return {'path': '', 'parent': None, 'places': places, 'dirs': [{'name': d, 'path': d} for d in drives], 'files': []}
+    folder = Path(path.strip().strip('"'))
+    if not folder.is_absolute() or not folder.is_dir():
+        raise HTTPException(404, '폴더를 찾을 수 없어요.')
+    dirs, files = [], []
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        raise HTTPException(403, '이 폴더는 열 수 없어요(권한 없음).')
+    for e in entries:
+        if e.name.startswith(('.', '$')):
+            continue
+        try:
+            if e.is_dir():
+                dirs.append({'name': e.name, 'path': e.path})
+            elif Path(e.name).suffix.lower() in LOCAL_MEDIA:
+                st = e.stat()
+                files.append({'name': e.name, 'path': e.path, 'size': st.st_size, 'mtime': st.st_mtime})
+        except OSError:
+            continue
+    dirs.sort(key=lambda d: d['name'].lower())
+    files.sort(key=lambda f: -f['mtime'])   # 최근 찍은 영상이 위로
+    parent = str(folder.parent) if folder.parent != folder else ''
+    return {'path': str(folder), 'parent': parent, 'places': [], 'dirs': dirs[:500], 'files': files[:500]}
+
+
 @app.post('/api/local-pick')
 def local_pick(request: Request):
     """Windows 파일 선택 창을 띄워 고른 파일 경로를 돌려준다(파일 내용은 옮기지 않는다)."""
