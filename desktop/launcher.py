@@ -133,6 +133,10 @@ def smoke(base, entry):
 
 def run(smoke_test=False):
     configure()
+    if not smoke_test:
+        # 코드만 바뀐 새 버전이 있으면 받아서 적용(전체 zip을 다시 받지 않아도 됨)
+        from desktop.updater import check_and_apply
+        check_and_apply(os.environ['STUDIO_DATA_DIR'], lambda m: print(m, flush=True))
     from filelock import FileLock
     from studio.settings import DATA, MODEL_DIR
     with FileLock(DATA / 'desktop.lock', timeout=0):
