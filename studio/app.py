@@ -104,13 +104,22 @@ class Login(BaseModel):
     password: str = Field(max_length=512)
 
 
+def desktop_local(request: Request):
+    return (hasattr(request.app.state, 'desktop_tickets') and request.client is not None
+            and request.client.host == '127.0.0.1' and request.url.hostname == '127.0.0.1')
+
+
 @app.post('/api/login')
 def login(body: Login, request: Request):
     address = request.client.host if request.client else 'local'
     failures = [t for t in LOGIN_FAILURES.get(address, []) if t > time.time() - 300]
     if len(failures) >= 10:
         raise HTTPException(429, '로그인 시도가 많습니다. 5분 후 다시 시도해 주세요.')
-    if not hmac.compare_digest(body.password.encode(), owner_password().encode()):
+    # PC 앱(127.0.0.1에서만 열리는 서버)에서는 비밀번호 없이 다시 들어올 수 있다.
+    # 같은 PC 사용자는 어차피 비밀번호 파일을 읽을 수 있고, 다른 사이트의 요청은 위 보안 미들웨어가 막는다.
+    if body.password == '' and desktop_local(request):
+        pass
+    elif not hmac.compare_digest(body.password.encode(), owner_password().encode()):
         LOGIN_FAILURES[address] = failures + [time.time()]
         raise HTTPException(401, '소유자 비밀번호가 일치하지 않습니다.')
     LOGIN_FAILURES.pop(address, None)
