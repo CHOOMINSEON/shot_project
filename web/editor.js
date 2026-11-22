@@ -46,6 +46,7 @@ bind('ed-split','click',splitHere);bind('ed-trim-head','click',trimHead);bind('e
 // 클릭: 선택 + 클릭한 위치로 이동(Shift: 여러 개 선택)
 track().addEventListener('click',e=>{
   if(e.target.closest('.trim'))return;
+  if(justDragged){justDragged=false;e.stopImmediatePropagation();e.preventDefault();return;}
   const b=e.target.closest('[data-clip]');if(!b)return;e.stopImmediatePropagation();const i=+b.dataset.clip;
   if(e.shiftKey){if(editMulti.has(i))editMulti.delete(i);else editMulti.add(i);if(!editMulti.has(selected))editMulti.add(selected);draw();return;}
   editMulti.clear();
@@ -66,6 +67,30 @@ track().addEventListener('drop',e=>{
   if(from<to)to-=1;if(from===to){draw();return;}
   selected=to;mutate(s=>{const [m]=s.clips.splice(from,1);s.clips.splice(to,0,m);}).catch(error=>toast(error.message));
 });
+
+// 마우스 왼쪽을 누른 채 끌면 구간을 자유롭게 옮긴다(자르기·선택 도구 모두). 6px 안쪽으로 움직이면 클릭으로 본다.
+let press=null,justDragged=false;
+function dropSpot(x,moving){const items=[...track().querySelectorAll('[data-clip]')].filter(el=>el!==moving);
+  for(const el of items){const r=el.getBoundingClientRect();if(x<r.left+r.width/2)return {el,after:false};}
+  const last=items[items.length-1];return last?{el:last,after:true}:null;}
+function clearDrop(){track().querySelectorAll('.drop-before,.drop-after').forEach(x=>x.classList.remove('drop-before','drop-after'));}
+track().addEventListener('pointerdown',e=>{
+  if(e.button!==0||e.shiftKey||e.target.closest('.trim'))return;const b=e.target.closest('[data-clip]');if(!b)return;
+  press={i:+b.dataset.clip,x:e.clientX,el:b,moved:false};
+});
+window.addEventListener('pointermove',e=>{
+  if(!press||trimming)return;const dx=e.clientX-press.x;
+  if(!press.moved){if(Math.abs(dx)<6)return;press.moved=true;hideCut();press.el.classList.add('dragging','moving');document.body.classList.add('clip-moving');}
+  press.el.style.transform=`translateX(${dx}px)`;clearDrop();const spot=dropSpot(e.clientX,press.el);if(spot)spot.el.classList.add(spot.after?'drop-after':'drop-before');
+});
+window.addEventListener('pointerup',e=>{
+  if(!press)return;const p=press;press=null;if(!p.moved)return;
+  justDragged=true;setTimeout(()=>{justDragged=false;},0);
+  const spot=dropSpot(e.clientX,p.el);p.el.style.transform='';p.el.classList.remove('dragging','moving');document.body.classList.remove('clip-moving');clearDrop();
+  if(!spot)return;let to=+spot.el.dataset.clip+(spot.after?1:0);const from=p.i;if(from<to)to-=1;if(from===to)return;
+  selected=to;mutate(s=>{const [m]=s.clips.splice(from,1);s.clips.splice(to,0,m);}).then(()=>selectClip(to,false)).catch(error=>toast(error.message));
+});
+window.addEventListener('pointercancel',()=>{if(!press)return;press.el.style.transform='';press.el.classList.remove('dragging','moving');document.body.classList.remove('clip-moving');clearDrop();press=null;});
 
 // 양끝 끌어서 길이 조절(원본 시간 기준, 프레임 단위로 맞춤)
 track().addEventListener('pointerdown',e=>{
@@ -98,7 +123,7 @@ setTool(tool);
 const cut=document.createElement('div');cut.className='cutline hidden';cut.innerHTML='<span></span>';track().parentElement.appendChild(cut);
 function hideCut(){cut.classList.add('hidden');}
 track().addEventListener('mousemove',e=>{
-  if(tool!=='blade'||trimming||dragFrom!==null||e.target.closest('.trim')){hideCut();return;}
+  if(tool!=='blade'||trimming||dragFrom!==null||press?.moved||e.target.closest('.trim')){hideCut();return;}
   const b=e.target.closest('[data-clip]');if(!b){hideCut();return;}
   const c=project?.state.clips[+b.dataset.clip];if(!c){hideCut();return;}
   const r=b.getBoundingClientRect(),tr=track().getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
