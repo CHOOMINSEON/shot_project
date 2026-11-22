@@ -606,8 +606,9 @@ def test_adjacent_clips_do_not_overlap_after_frame_rounding():
     assert clips[0]['end'] <= clips[1]['start'] + 1e-9
 
 
-def test_mukbang_keeps_bite_and_reaction_with_face_visible():
+def test_mukbang_eating_shows_under_taste_narration():
     # 1122 원본 모양: 제품을 바꿔 한참 말없이 먹고(먹기 프레임 40초) 나서 맛을 말한다.
+    # 말없이 먹는 장면을 따로 넣지 않고, 먹는 화면 위에 바로 뒤 소감 목소리를 깐다(나레이션).
     words = [w(1, ' 오늘은 편의점 신상 초콜릿을 먹어볼게요.', 2, 5), w(2, ' 단짠단짠한데 크런키한게 씹혀요.', 50, 53),
              w(3, ' 이건 8점 드릴게요.', 56, 58)]
     voice = [(2, 4.8), (50, 52.7), (56, 57.8)]
@@ -615,11 +616,16 @@ def test_mukbang_keeps_bite_and_reaction_with_face_visible():
     frames = [frame(1, 40, 41, {'eating': .9}, shot=3)]
     rules = guided.parse_guideline(guided.default_for('product_mukbang'), 'product_mukbang')
     out = guided.plan([a], rules, {'v': frames}, {})
-    covered = lambda t: any(c['start'] <= t <= c['end'] and not c.get('visual_asset_id') for c in out['clips'])
-    assert covered(40.2)                      # 먹는 순간(원래 화면)
-    assert covered(49.5)                      # 맛을 말하기 직전 표정 반응
-    assert not any(c.get('visual_asset_id') and c['start'] < 53 and c['end'] > 50 for c in out['clips'])   # 첫 평가는 얼굴 그대로
-    assert not covered(45)                    # 말없이 씹는 긴 구간은 줄인다
+    narr = [c for c in out['clips'] if c.get('visual_asset_id')]
+    assert len(narr) == 1
+    n = narr[0]
+    assert n['start'] < 50.2 and n['end'] > 51          # 소리는 소감 발화
+    assert n['visual_start'] < 40.2 < n['visual_end']   # 화면은 먹는 순간
+    assert '나레이션' in n['guided']['units'][0]['reason']
+    # 말없이 먹는 장면을 소리째 따로 넣지 않는다
+    assert not any(c['start'] < 49.5 and c['end'] > 39.5 and not c.get('visual_asset_id') for c in out['clips'])
+    # 남은 소감과 점수는 얼굴 화면
+    assert any(not c.get('visual_asset_id') and c['start'] <= 57 <= c['end'] for c in out['clips'])
 
 
 def test_product_intro_and_ingredients_survive_length_trim():

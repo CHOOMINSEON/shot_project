@@ -214,6 +214,32 @@ def analyze(ident, payload):
     return {'asset_id': asset['id'], 'candidates': len(data['candidates']), 'words': len(data['words'])}
 
 
+AUDIO_RATE = 48000
+
+
+def join_piece_audio(pieces, lengths, work, cancelled):
+    """조각 소리를 타임라인 길이에 맞춰 샘플 단위로 이어 붙인다(원시 PCM).
+
+    조각 MP4를 '-c copy'로 그냥 이으면 조각마다 AAC 앞 여백(1024샘플)과 프레임 올림이 쌓여 소리가 조각당 약 0.03초씩
+    늦어진다. 실제 1122 미리보기(37조각)에서 끝부분 목소리가 화면·자막보다 1.13초 늦었다. 각 조각을 풀어서
+    '타임라인상 시작~끝' 샘플 수만큼 자르거나 채워 이으면 누적 어긋남이 0이 된다.
+    """
+    out = Path(work) / 'joined-audio.pcm'
+    t = 0.
+    with out.open('wb') as joined:
+        for piece, length in zip(pieces, lengths):
+            raw = Path(piece).with_suffix('.pcm')
+            if not raw.exists():
+                partial = raw.with_suffix('.partial.pcm')
+                run_ffmpeg(['-i', piece, '-vn', '-ac', '2', '-ar', str(AUDIO_RATE), '-f', 's16le', partial], work, cancelled)
+                partial.replace(raw)
+            samples = round((t + length) * AUDIO_RATE) - round(t * AUDIO_RATE)
+            t += length
+            data = raw.read_bytes()[:samples * 4]
+            joined.write(data + b'\0' * (samples * 4 - len(data)))
+    return out
+
+
 def render(ident, payload):
     state = payload['state']  # Frozen revision; subsequent edits cannot mutate this export.
     preview = payload.get('preview', False)
@@ -270,8 +296,12 @@ def render(ident, payload):
         concat = work / 'concat.txt'
         paths = [p.as_posix().replace("'", "'\\''") for p in pieces]
         concat.write_text(''.join("file '" + path + "'\n" for path in paths), encoding='utf-8')
+        audio = join_piece_audio(pieces, [c['end'] - c['start'] for c in clips], work, lambda: is_cancelled(ident))
         run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '0', '-i', concat,
-                    '-c', 'copy', '-movflags', '+faststart', output], work, lambda: is_cancelled(ident))
+                    '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', output],
+                   work, lambda: is_cancelled(ident))
+        audio.unlink(missing_ok=True)
         rendered_info = probe(output)
         if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
             raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')

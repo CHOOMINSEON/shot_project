@@ -392,7 +392,7 @@ def parse_guideline(text, style='oneshot'):
         rules['applied'] = [a for a in rules['applied'] if not a.startswith('목표 길이')]
         rules['applied'] += ['문장 사이·문장 안의 무음 제거', '여러 번 말한 문장은 가장 잘 말한 한 번만', '말한 순서 그대로 · 길이 맞추려고 빼지 않음']
     food = style in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant')
-    rules['bites'] = food   # 먹방: 먹는 순간·표정 반응은 얼굴 화면 그대로 남긴다
+    rules['bites'] = food   # 먹방: 먹는 화면 위에 바로 뒤 소감 목소리를 깐다(시식 나레이션)
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
     if rules['overlay_eating']:
@@ -819,48 +819,44 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
 
 BITE_GAP = 12.     # 맛 평가 앞에서 이만큼 말이 없고 그 사이 '먹기' 장면이 보이면 시식으로 본다
 BITE_GAP_BLIND = 20.   # '먹기' 장면을 못 찾았을 때는 더 오래 말이 없어야 시식으로 본다
-BITE_SHOW = (.4, 1.2)   # 먹는 장면(시각 모델 '먹기' 프레임) 앞·뒤로 보여 줄 길이
-BITE_REACT = .8   # 맛 평가 직전 씹으며 반응하는 얼굴
+BITE_SHOW = (.4, 2.)   # 먹는 장면(시각 모델 '먹기' 프레임) 앞·뒤로 보여 줄 길이(이 화면 위에 소감 목소리가 나온다)
+BITE_BLIND = 1.8   # '먹기' 장면을 못 찾았을 때 말하기 직전 씹는 화면 길이
 
 
 def _add_bites(units, sentences, frames, voice, asset, duration):
-    """시식 구간: 한동안 말없이 먹은 뒤 맛을 말하는 곳마다, 먹는 순간(첫 한입)과 직전 표정 반응을 얼굴 화면 그대로 남긴다.
+    """시식 나레이션: 한동안 말없이 먹은 뒤 맛을 말하는 곳마다, 먹는 화면 위에 그 소감 목소리를 깐다.
 
-    1122 원본에서 실제로 본 문제: 먹방 원본의 먹는 장면이 전부 '평가 소리 위 1초 화면'으로만 쓰이거나 목표 길이 때문에 빠져서
-    먹방 장면이 통으로 사라졌다. 지침: '먹는 순간(특히 첫 한입과 표정 반응)', '음성이 없다는 이유만으로 삭제하지 마',
-    '말없이 씹기만 하는 긴 구간은 1~2초만 남기기', '첫 한입·표정 반응은 디테일 컷으로 덮지 말고 얼굴이 보이게'.
+    1122 원본에서 실제로 본 문제: 먹는 장면이 전부 빠져서 먹방 장면이 통으로 사라졌다. 그렇다고 말없이 먹는 장면을
+    따로 넣으면 지루하다(사용자 피드백 2026-11-22: '먹방 장면은 지루하니까 먹방 중이거나 먹방 후에 소감 ... 나레이션을 넣음').
+    그래서 먹는 순간(첫 한입)의 화면을 소감 발화 앞부분에 얹고(소리는 소감 그대로), 남은 말은 얼굴 화면으로 돌아온다.
+    제품을 들고 설명하거나 화면을 보며 설명하는 말은 원래 화면 그대로 둔다(여기서 다루지 않음).
     """
     eats = sorted(r['start'] for r in frames if 'eating' in (r.get('tags') or {}))
     spoken = sorted((s['voice'][0] if s.get('voice') else s['start'], s['voice'][1] if s.get('voice') else s['end']) for s in sentences)
     speech_units = [u for u in units if u['kind'] == 'speech']
-    out = list(units)
+    shown = []
     for u in speech_units:
-        if u['drop'] or not set(u['labels']) & {'taste', 'pro', 'con'}:
+        if u['drop'] or not set(u['labels']) & {'taste', 'pro', 'con'} or set(u['labels']) & INTRO_LABELS:
             continue
         s0 = u['speech_start']
         quiet_from = max([b for a, b in spoken if b <= s0 - .05] + [b for a, b in voice if b <= s0 - .05] + [0.])
         eat = [t for t in eats if quiet_from + .5 <= t <= s0 - .5]
         if s0 - quiet_from < (BITE_GAP if eat else BITE_GAP_BLIND):
             continue
-        pieces = []
         if eat:
             t = eat[-1]   # 말하기 전 마지막으로 먹은 순간
-            pieces.append((max(quiet_from + .3, t - BITE_SHOW[0]), min(t + BITE_SHOW[1], s0)))
-        react = (max(quiet_from + .3, u['start'] - BITE_REACT), u['start'])
-        if pieces and react[0] - pieces[-1][1] < .6:
-            pieces[-1] = (pieces[-1][0], react[1])      # 한입과 반응이 붙어 있으면 한 장면으로
+            a, b = max(quiet_from + .3, t - BITE_SHOW[0]), min(t + BITE_SHOW[1], u['start'])
         else:
-            pieces.append(react)
-        for k, (a, b) in enumerate(pieces):
-            if b - a < .5:
-                continue
-            out.append({'kind': 'visual', 'asset_id': asset['id'], 'filename': asset['name'], 'start': a, 'end': b,
-                        'role': 'eating', 'labels': ['eating'], 'visual_roles': ['eating'], 'text': '', 'drop': None,
-                        'review': [], 'bite': True, **({'product': u['product']} if u.get('product') else {})})
-        u['after_bite'] = True   # 먹고 바로 말한 첫 평가는 얼굴이 보이게(시식 컷을 얹지 않음)
-    # 시식 장면과 겹치는 일반 '먹기' 장면 조각은 뺀다(같은 장면이 두 번 나오지 않게)
-    bites = [(u['start'], u['end']) for u in out if u.get('bite')]
-    return [u for u in out if u.get('bite') or u['kind'] != 'visual' or not any(u['start'] < b and u['end'] > a for a, b in bites)]
+            a, b = max(quiet_from + .3, u['start'] - .3 - BITE_BLIND), u['start'] - .3
+        talk = u['end'] - u['start']
+        if b - a < .6 or talk < .6:
+            continue
+        take = min(b - a, talk)
+        u['overlay'] = {'start': a, 'end': a + take, 'role': 'eating', 'narration': True}
+        u['after_bite'] = True   # 다른 시식 컷을 또 얹지 않고, 후킹 몽타주로도 쓰지 않는다
+        shown.append((a, a + take))
+    # 나레이션 화면으로 쓴 먹는 장면은 따로 넣지 않는다(같은 장면이 두 번 나오지 않게)
+    return [u for u in units if u['kind'] != 'visual' or not any(u['start'] < y and u['end'] > x for x, y in shown)]
 
 
 # ------------------------------------------------------------------- 메인 계획
@@ -1206,7 +1202,7 @@ def overlay_eating(kept, window=240.):
     used, count = set(), 0
     for s in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
         labels = set(s['labels'])
-        if s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro'}:
+        if s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro', 'describe', 'compare'}:
             continue
         name = (s.get('product') or {}).get('name')
         best = None
@@ -1308,7 +1304,7 @@ def _merge_clips(kept, assets, rules, fps):
             split = u['end'] if whole else u['start'] + take
             clips.append({'asset_id': u['asset_id'], 'start': u['start'], 'end': split, 'frame': frame,
                           'visual_asset_id': u['asset_id'], 'visual_start': over['start'], 'visual_end': over['end'],
-                          'guided': {'units': [{**_brief(u), 'reason': _reason(u) + f' · 화면은 {ROLE_LABEL.get(over["role"], over["role"])} 컷'}]}})
+                          'guided': {'units': [{**_brief(u), 'reason': _reason(u) + (' · 먹는 화면 위 소감 나레이션' if over.get('narration') else f' · 화면은 {ROLE_LABEL.get(over["role"], over["role"])} 컷')}]}})
             cur = None if whole else {'asset_id': u['asset_id'], 'start': split, 'end': u['end'], 'frame': frame,
                                       'guided': {'units': [_brief(u)]}}
             continue
