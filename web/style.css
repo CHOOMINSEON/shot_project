@@ -314,3 +314,14 @@ body.clip-moving,body.clip-moving *{cursor:grabbing!important;user-select:none}
 .tl-content>.playhead{bottom:auto;z-index:7;pointer-events:none}
 .ph-handle{position:absolute;top:0;left:-6px;width:14px;height:18px;background:#fff;clip-path:polygon(0 0,100% 0,100% 62%,50% 100%,0 62%);pointer-events:auto;cursor:ew-resize}
 body.scrubbing,body.scrubbing *{cursor:ew-resize!important;user-select:none}
+/* 12차: 길이 조절 손잡이(캡컷식) 잘 보이게 + 끄는 동안 바로 보여주기 */
+.studio .timeline-clip .trim,.layer-clip .trim{position:absolute;top:0;bottom:0;width:10px;z-index:4;cursor:ew-resize!important;border:0!important;background:transparent;transition:background .1s}
+.studio .timeline-clip .trim-l,.layer-clip .trim-l{left:0;border-radius:4px 0 0 4px}
+.studio .timeline-clip .trim-r,.layer-clip .trim-r{right:0;border-radius:0 4px 4px 0}
+.studio .timeline-clip .trim::after,.layer-clip .trim::after{content:"";position:absolute;left:4px;top:50%;width:2px;height:16px;margin-top:-8px;border-radius:1px;background:#1d1e22;opacity:0}
+.studio .timeline-clip:hover .trim,.layer-clip:hover .trim{background:#ffffffb3}
+.studio .timeline-clip.active .trim,.layer-clip.active .trim,.studio .timeline-clip.trimming .trim,.layer-clip.trimming .trim,.studio .timeline-clip .trim:hover,.layer-clip .trim:hover{background:#fff}
+.studio .timeline-clip:hover .trim::after,.layer-clip:hover .trim::after,.studio .timeline-clip.active .trim::after,.layer-clip.active .trim::after,.trimming .trim::after{opacity:1}
+.studio .timeline-clip.active,.layer-clip.active,.studio .timeline-clip.trimming,.layer-clip.trimming{box-shadow:inset 0 0 0 2px #fff}
+.studio .timeline-clip.trimming,.layer-clip.trimming{z-index:6;transition:none}
+.trim-tip{position:absolute;z-index:8;transform:translateX(-50%);background:#fff;color:#111;font-size:11px;font-weight:600;padding:2px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;box-shadow:0 2px 8px #0008}
