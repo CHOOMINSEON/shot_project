@@ -352,3 +352,6 @@ body.marqueeing,body.marqueeing *{user-select:none;cursor:crosshair!important}
 .frame-toggle{display:flex;gap:6px}
 .frame-toggle button{flex:1;padding:8px;font-size:13px;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:8px}
 .frame-toggle button.active{background:var(--soft);color:var(--ink);border-color:#fff}
+/* 15차: 프로젝트 이름 칸을 위 선택 칸과 같은 위치로, 자막 줄 전체 클릭 */
+.studio .project-title input{padding-left:10px!important;border:1px solid transparent!important;border-radius:7px}
+.cap-row{cursor:pointer}

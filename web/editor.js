@@ -180,6 +180,7 @@ wrap.addEventListener('wheel',e=>{
 window.timelineScroll=dir=>{wrap.scrollLeft+=dir*wrap.clientWidth*.12;};
 // 재생헤드가 화면 밖이면 보이게 넘겨 준다
 function keepVisible(){const x=playheadX();if(x===null)return;if(x<wrap.scrollLeft+20||x>wrap.scrollLeft+wrap.clientWidth-40)wrap.scrollLeft=Math.max(0,x-wrap.clientWidth/2);}
+window.timelineKeepVisible=keepVisible;
 window.timelineNudge=(dt)=>{const x=playheadX(),t=x===null?0:x/pps();seekTo(Math.max(0,t+dt));requestAnimationFrame(keepVisible);setTimeout(keepVisible,120);};
 window.timelineJump=(dir)=>{const x=playheadX(),t=x===null?0:x/pps(),edges=[0];let off=0;for(const c of project.state.clips){off+=c.end-c.start;edges.push(off);}
   const e=dir<0?[...edges].reverse().find(v=>v<t-1e-3):edges.find(v=>v>t+1e-3);if(e===undefined)return;seekTo(Math.min(e,off-frame()/2));requestAnimationFrame(keepVisible);setTimeout(keepVisible,120);};

@@ -25,8 +25,8 @@ list.addEventListener('input',e=>{const t=e.target.closest('[data-cap]');if(!t)r
   overlay(i,t.value);pending={i,text:t.value};clearTimeout(saveTimer);saveTimer=setTimeout(save,500);});
 list.addEventListener('focusout',e=>{if(e.target.closest('[data-cap]'))save().then(()=>setTimeout(render,0));});
 // 줄을 누르면 그 자막 시간으로 이동(멈춤)
-list.addEventListener('click',e=>{const b=e.target.closest('[data-cap-seek]');const t=e.target.closest('[data-cap]');const i=b?+b.dataset.capSeek:t?+t.dataset.cap:null;
-  if(i===null||!items()[i])return;$('player').pause();seekEdited(items()[i].start+.01,false);});
+list.addEventListener('click',e=>{const r=e.target.closest('.cap-row');const i=r?+r.dataset.row:null;
+  if(i===null||!items()[i])return;$('player').pause();seekEdited(items()[i].start+.01,false);setTimeout(()=>window.timelineKeepVisible?.(),150);});
 action('cap-generate',async()=>{await save();$('generate-captions').click();});
 action('cap-srt',async()=>{requireProject();await save();await saveQueue;
   if(!items().length)throw Error('먼저 생성을 눌러 자막을 만들어 주세요.');
