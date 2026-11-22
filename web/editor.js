@@ -39,6 +39,7 @@ function pasteClips(){
   const at=project.state.clips.length?selected+1:0,n=clipBuffer.length;
   return mutate(s=>s.clips.splice(at,0,...clipBuffer.map(c=>({...clone(c),id:uuid()})))).then(()=>{editMulti.clear();selectClip(Math.min(at+n-1,project.state.clips.length-1),false);toast(`구간 ${n}개를 붙여넣었어요.`);});
 }
+window.editorOps={splitHere,trimHead,trimTail};   // 편집 채팅에서 사용
 bind('ed-copy','click',copyClips);bind('ed-paste','click',pasteClips);
 bind('ed-split','click',splitHere);bind('ed-trim-head','click',trimHead);bind('ed-trim-tail','click',trimTail);bind('ed-delete','click',removeSelected);bind('ed-dup','click',duplicate);
 

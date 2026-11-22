@@ -101,7 +101,8 @@ def main():
         settle()
         assert len(puts) == before and '구간 안' in page.text_content('#toast')
         # 5) 끌어서 순서 변경: 첫 구간을 맨 뒤로
-        page.drag_and_drop('[data-clip="0"]', '[data-clip="2"]', source_position={'x': 30, 'y': 8}, target_position={'x': 90, 'y': 8})
+        w2 = page.locator('[data-clip="2"]').bounding_box()['width']
+        page.drag_and_drop('[data-clip="0"]', '[data-clip="2"]', source_position={'x': 30, 'y': 8}, target_position={'x': w2 * .9, 'y': 8})
         settle()
         assert ids() == ['c1', 'c2', 'c0'], ids()
         # 6) 오른쪽 끝을 끌어서 길이 조절(구간 폭의 절반만큼 → 길이 +50%)
