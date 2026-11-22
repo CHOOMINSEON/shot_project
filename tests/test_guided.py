@@ -346,7 +346,8 @@ def test_score_verdict_is_classified_and_never_trimmed():
 
 
 def test_eating_shot_is_laid_over_later_taste_comment_and_not_repeated():
-    words = [w(1, ' 오늘은 편의점 신상 찹쌀떡을 먹어볼게요.', 2, 5),
+    # 먹고 나서 잠깐 다른 말을 한 뒤(12초 안) 평가: 시식 구간이 아니라 먹는 화면을 평가 위에 얹는다.
+    words = [w(1, ' 오늘은 편의점 신상 찹쌀떡을 먹어볼게요.', 2, 5), w(4, ' 오 이거 크기가 커요.', 21, 22.5),
              w(2, ' 식감이 정말 쫄깃하고 맛있어요.', 30, 33),        # 먹고 나서 말한 평가 → 먹는 화면을 얹는다
              w(3, ' 이건 8점 드릴게요.', 36, 38)]                    # 점수는 얼굴 화면 그대로
     frames = [frame(0, 14, 16, {'eating': .3}, shot=1), frame(1, 16, 18, {'eating': .3}, shot=1)]
@@ -365,7 +366,7 @@ def test_eating_shot_is_laid_over_later_taste_comment_and_not_repeated():
 
 
 def test_short_eating_shot_covers_only_the_start_of_a_long_comment():
-    words = [w(1, ' 식감이 정말 쫄깃하고 촉촉하고 부드럽고 달달해서 계속 먹게 되는 맛이에요.', 30, 36)]
+    words = [w(2, ' 오 이거 크기가 커요.', 23, 24.5), w(1, ' 식감이 정말 쫄깃하고 촉촉하고 부드럽고 달달해서 계속 먹게 되는 맛이에요.', 30, 36)]
     frames = [frame(0, 20, 21.5, {'eating': .3}, shot=1)]
     result, _, _ = run(words, frames=frames, duration=45)
     over = [c for c in result['clips'] if c.get('visual_asset_id')]
@@ -603,3 +604,47 @@ def test_adjacent_clips_do_not_overlap_after_frame_rounding():
     clips = guided._merge_clips(units, [a], {'frame': 'auto', 'tight': False}, 30)
     assert len(clips) == 2
     assert clips[0]['end'] <= clips[1]['start'] + 1e-9
+
+
+def test_mukbang_keeps_bite_and_reaction_with_face_visible():
+    # 1122 원본 모양: 제품을 바꿔 한참 말없이 먹고(먹기 프레임 40초) 나서 맛을 말한다.
+    words = [w(1, ' 오늘은 편의점 신상 초콜릿을 먹어볼게요.', 2, 5), w(2, ' 단짠단짠한데 크런키한게 씹혀요.', 50, 53),
+             w(3, ' 이건 8점 드릴게요.', 56, 58)]
+    voice = [(2, 4.8), (50, 52.7), (56, 57.8)]
+    a = _voice_asset(words, voice, duration=70)
+    frames = [frame(1, 40, 41, {'eating': .9}, shot=3)]
+    rules = guided.parse_guideline(guided.default_for('product_mukbang'), 'product_mukbang')
+    out = guided.plan([a], rules, {'v': frames}, {})
+    covered = lambda t: any(c['start'] <= t <= c['end'] and not c.get('visual_asset_id') for c in out['clips'])
+    assert covered(40.2)                      # 먹는 순간(원래 화면)
+    assert covered(49.5)                      # 맛을 말하기 직전 표정 반응
+    assert not any(c.get('visual_asset_id') and c['start'] < 53 and c['end'] > 50 for c in out['clips'])   # 첫 평가는 얼굴 그대로
+    assert not covered(45)                    # 말없이 씹는 긴 구간은 줄인다
+
+
+def test_product_intro_and_ingredients_survive_length_trim():
+    # 제품마다: 들고 소개 → 구성 설명 → (먹고) 평가 → 점수. 길이가 넘쳐도 소개·구성 설명은 남긴다('먹방만 넣으면 안 된다').
+    words = []
+    t = 2
+    for n, name in enumerate(['CU 소금우유', 'GS 호지차', '이마트24 허니페어', '세븐일레븐 크림브륄레']):
+        words += [w(10 * n + 1, f' 먼저 {name}는', t, t + 2), w(10 * n + 2, ' 안에 캐러멜칩이 들어갔다는데', t + 3, t + 5),
+                  w(10 * n + 3, ' 그냥 여기 이렇게 놓고요', t + 6, t + 9),
+                  w(10 * n + 4, ' 진짜 맛있어요 식감이 좋아요', t + 40, t + 45), w(10 * n + 5, ' 고소하고 달달한 맛이에요', t + 47, t + 52),
+                  w(10 * n + 6, ' 이건 8점 드릴게요.', t + 55, t + 57)]
+        t += 70
+    rules = guided.parse_guideline(guided.default_for('product_mukbang'), 'product_mukbang')
+    out = guided.plan([asset(words, duration=t + 10)], rules, {'v': []}, {})
+    kept = ' '.join(u['text'] for u in out['units'])
+    assert kept.count('캐러멜칩이 들어갔다는데') == 4
+    assert all(name in kept for name in ['CU', 'GS', '이마트24', '세븐일레븐'])
+    assert kept.count('8점') == 4
+
+
+def test_short_fragment_is_not_mistaken_for_a_retake():
+    words = [w(1, ' 먼저 CU 소금우유는', 2, 4), w(2, ' 밀크초콜릿에', 5, 6), w(3, ' 소금우유', 7, 8), w(4, ' 필링까지 들어갔다는데', 9, 11)]
+    sentences = guided.mark_redundant(guided.split_sentences(guided_tokens(words), 20))
+    assert not any(s['drop'] for s in sentences)
+
+
+def guided_tokens(words):
+    return tokens(words)

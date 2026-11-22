@@ -392,6 +392,7 @@ def parse_guideline(text, style='oneshot'):
         rules['applied'] = [a for a in rules['applied'] if not a.startswith('목표 길이')]
         rules['applied'] += ['문장 사이·문장 안의 무음 제거', '여러 번 말한 문장은 가장 잘 말한 한 번만', '말한 순서 그대로 · 길이 맞추려고 빼지 않음']
     food = style in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant')
+    rules['bites'] = food   # 먹방: 먹는 순간·표정 반응은 얼굴 화면 그대로 남긴다
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
     if rules['overlay_eating']:
@@ -422,10 +423,14 @@ CLASSIFIERS = [
     ('taste', TASTE),
     ('con', r'아쉽|아쉬운|아쉬워|아쉬웠|단점|별로|부족|비싸|적어|양이\s*적|작아|실망'),
     ('pro', r'장점|좋[네은았아]|괜찮|만족|넉넉|푸짐|가득'),
-    ('conclusion', r'여러분은?.*(보셨|생각|어떠|어땠)|(어떻게|어떤)\s*(보|느끼|생각)'),   # 시청자에게 묻는 마무리 질문
+    ('conclusion', r'여러분은?.*(보셨|생각|어떠|어땠|궁금)|(어떻게|어떤)\s*(보|느끼|생각)'),   # 시청자에게 묻는 마무리 질문
+    ('conclusion', r'제일\s*맛있었|가장\s*맛있었|(제일|가장)\s*(좋았|맛있는)|1\s*위|원\s*픽|최애'),          # 여러 제품 중 고른 결론   # 시청자에게 묻는 마무리 질문
     ('question', r'\?|까요|나요|할까|일까|인가요|궁금|왜\s'),
     ('cooking', r'넣[고어은]|붓|돌려|돌리|섞|끓|굽|볶|올려|올리|자르|뿌리|익히|부수|전자레인지|\d+\s*분'),
     ('intro', r'오늘은|이번에|소개|신상|편의점|출시|나왔|새로\s*나|이\s*제품|제품은'),
+    # 제품을 들고 설명하는 말(순서·구성·재료)과 다른 제품과의 비교. 1122 원본에서 이 말이 전부 빠져 먹방만 남았다.
+    ('describe', r'^\s*(먼저|첫\s*번째|두\s*번째|세\s*번째|다음(은|으로)|마지막(은|으로))|부터는|들어[가갔있간]|코팅|필링|토핑|시럽|크림이|칩이|인데\s*$|인데요?\s*$'),
+    ('compare', r'비하면|비해서?|보다(는|도)?\s|비교|차이|똑같|다르|달라'),
 ]
 MISTAKE = re.compile(r'(다시\s*(할게|해볼게|갈게|찍)|잠깐|엔지|NG|아\s*잘못|컷|레디|카메라|촬영\s*(시작|준비)|녹화)', re.I)
 
@@ -449,7 +454,7 @@ def split_restarts(bucket):
     for i in range(2, len(bucket) - 1):
         head = norm(''.join(w['text'] for w in bucket[:i]))
         tail = norm(''.join(w['text'] for w in bucket[i:]))
-        if len(head) >= 4 and len(tail) > len(head) and tail.startswith(head):
+        if len(head) >= 4 and len(tail) >= len(head) and tail.startswith(head):   # 같은 말을 통째로 두 번 한 경우도
             return [bucket[:i]] + split_restarts(bucket[i:])
     return [list(bucket)]
 
@@ -539,6 +544,8 @@ def mark_redundant(sentences):
             nb = texts[j]
             if len(na) < 4 or len(nb) < 4:
                 continue
+            if min(len(na), len(nb)) < 6 and not (nb.startswith(na) or na.startswith(nb)):
+                continue   # "소금우유" 같은 짧은 조각은 앞부분이 같을 때만 재시도로 본다(이어서 한 설명이 빠지지 않게)
             sim = difflib.SequenceMatcher(None, na, nb, autojunk=False).ratio()
             if nb.startswith(na) or na.startswith(nb):
                 sim = max(sim, .9)  # 한쪽이 다른 쪽의 시작 부분 = 같은 말을 이어서 다시 말함
@@ -620,12 +627,12 @@ def product_for(frames_in_range, evidence, asset_id):
 
 
 # ------------------------------------------------------------------ 점수·길이
-SENTENCE_WEIGHT = [('score', 10), ('repurchase', 10), ('conclusion', 10), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
-                   ('question', 6), ('intro', 5), ('cooking', 4)]
+SENTENCE_WEIGHT = [('score', 10), ('repurchase', 10), ('conclusion', 10), ('compare', 9), ('intro', 8), ('describe', 8), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
+                   ('question', 6), ('cooking', 4)]
 VISUAL_WEIGHT = {'eating': 7, 'crosssection': 6, 'cutting': 5, 'opening': 5, 'packaging': 5, 'cooking': 3}
 MUST_KEEP = {'repurchase', 'conclusion', 'score'}
 LABEL_KO = {'score': '점수', 'repurchase': '재구매 의사', 'conclusion': '결론', 'taste': '맛·식감 평가', 'con': '아쉬운 점', 'price': '가격',
-            'pro': '장점', 'question': '질문', 'intro': '제품 소개', 'cooking': '조리 설명', 'chat': '일반 발화'}
+            'pro': '장점', 'question': '질문', 'intro': '제품 소개', 'describe': '제품 설명', 'compare': '비교', 'cooking': '조리 설명', 'chat': '일반 발화'}
 
 
 def sentence_score(unit):
@@ -763,6 +770,15 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
         if prod:
             unit['product'] = prod
         units.append(unit)
+    # 인식기가 쉼 때문에 한 설명을 여러 조각으로 나눈 경우("먼저 CU 소금우유는" / "밀크초콜릿에" / "필링까지 캐러멜칩이 들어갔다는데"):
+    # 제품 설명·비교 문장과 4초 안으로 붙은 이름 없는 조각도 같은 설명으로 본다(말이 중간에 끊기지 않게).
+    for _ in range(3):
+        for a, b in zip(units, units[1:]):
+            if b['speech_start'] - a['speech_end'] > 4:
+                continue
+            for x, y in ((a, b), (b, a)):
+                if x['labels'] == ['chat'] and set(y['labels']) & {'describe', 'compare', 'intro'}:
+                    x['labels'], x['role'] = ['describe'], 'describe'
     spans = [(u['speech_start'], u['speech_end']) for u in units]
     for sh in ([] if rules.get('tight') else shots):   # 말 위주 편집(해석 영상)은 말 없는 장면을 따로 넣지 않는다
         if sh['role'] not in rules['keep']:
@@ -796,7 +812,55 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
             if prod:
                 unit['product'] = prod
             units.append(unit)
+    if rules.get('bites'):
+        units = _add_bites(units, sentences, frames, voice, asset, duration)
     return sorted(units, key=lambda u: (u['start'], u['end']))
+
+
+BITE_GAP = 12.     # 맛 평가 앞에서 이만큼 말이 없고 그 사이 '먹기' 장면이 보이면 시식으로 본다
+BITE_GAP_BLIND = 20.   # '먹기' 장면을 못 찾았을 때는 더 오래 말이 없어야 시식으로 본다
+BITE_SHOW = (.4, 1.2)   # 먹는 장면(시각 모델 '먹기' 프레임) 앞·뒤로 보여 줄 길이
+BITE_REACT = .8   # 맛 평가 직전 씹으며 반응하는 얼굴
+
+
+def _add_bites(units, sentences, frames, voice, asset, duration):
+    """시식 구간: 한동안 말없이 먹은 뒤 맛을 말하는 곳마다, 먹는 순간(첫 한입)과 직전 표정 반응을 얼굴 화면 그대로 남긴다.
+
+    1122 원본에서 실제로 본 문제: 먹방 원본의 먹는 장면이 전부 '평가 소리 위 1초 화면'으로만 쓰이거나 목표 길이 때문에 빠져서
+    먹방 장면이 통으로 사라졌다. 지침: '먹는 순간(특히 첫 한입과 표정 반응)', '음성이 없다는 이유만으로 삭제하지 마',
+    '말없이 씹기만 하는 긴 구간은 1~2초만 남기기', '첫 한입·표정 반응은 디테일 컷으로 덮지 말고 얼굴이 보이게'.
+    """
+    eats = sorted(r['start'] for r in frames if 'eating' in (r.get('tags') or {}))
+    spoken = sorted((s['voice'][0] if s.get('voice') else s['start'], s['voice'][1] if s.get('voice') else s['end']) for s in sentences)
+    speech_units = [u for u in units if u['kind'] == 'speech']
+    out = list(units)
+    for u in speech_units:
+        if u['drop'] or not set(u['labels']) & {'taste', 'pro', 'con'}:
+            continue
+        s0 = u['speech_start']
+        quiet_from = max([b for a, b in spoken if b <= s0 - .05] + [b for a, b in voice if b <= s0 - .05] + [0.])
+        eat = [t for t in eats if quiet_from + .5 <= t <= s0 - .5]
+        if s0 - quiet_from < (BITE_GAP if eat else BITE_GAP_BLIND):
+            continue
+        pieces = []
+        if eat:
+            t = eat[-1]   # 말하기 전 마지막으로 먹은 순간
+            pieces.append((max(quiet_from + .3, t - BITE_SHOW[0]), min(t + BITE_SHOW[1], s0)))
+        react = (max(quiet_from + .3, u['start'] - BITE_REACT), u['start'])
+        if pieces and react[0] - pieces[-1][1] < .6:
+            pieces[-1] = (pieces[-1][0], react[1])      # 한입과 반응이 붙어 있으면 한 장면으로
+        else:
+            pieces.append(react)
+        for k, (a, b) in enumerate(pieces):
+            if b - a < .5:
+                continue
+            out.append({'kind': 'visual', 'asset_id': asset['id'], 'filename': asset['name'], 'start': a, 'end': b,
+                        'role': 'eating', 'labels': ['eating'], 'visual_roles': ['eating'], 'text': '', 'drop': None,
+                        'review': [], 'bite': True, **({'product': u['product']} if u.get('product') else {})})
+        u['after_bite'] = True   # 먹고 바로 말한 첫 평가는 얼굴이 보이게(시식 컷을 얹지 않음)
+    # 시식 장면과 겹치는 일반 '먹기' 장면 조각은 뺀다(같은 장면이 두 번 나오지 않게)
+    bites = [(u['start'], u['end']) for u in out if u.get('bite')]
+    return [u for u in out if u.get('bite') or u['kind'] != 'visual' or not any(u['start'] < b and u['end'] > a for a, b in bites)]
 
 
 # ------------------------------------------------------------------- 메인 계획
@@ -912,7 +976,11 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
     if total(kept) > target_max and not rules.get('no_trim') and not scene_mode:
-        order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -length(u)))
+        # 시식 장면(먹는 순간·표정 반응)은 음성이 없어도 길이 때문에 빼지 않는다(지침: 음성이 없다는 이유만으로 삭제하지 마).
+        # 제품마다 처음 들고 설명한 말도 남긴다(소개 → 시식 → 평가 → 점수 구성. '먹방만 넣으면 안 된다').
+        _anchor_product_intros(kept)
+        order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP) and not u.get('bite') and not u.get('after_bite')
+                        and not u.get('intro_anchor')), key=lambda u: (score(u), -length(u)))
         for u in order:
             if total(kept) <= target_max:
                 break
@@ -988,6 +1056,49 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             'applied': rules['applied'], 'unapplied': rules['unapplied'], 'overlays': overlays}
 
 
+INTRO_LABELS = {'describe', 'intro', 'compare'}
+CONTENT = re.compile(r'들어[가갔있간]|코팅|필링|토핑|크림|칩|시럽|함량|겉은|안에는|속에는')
+
+
+def _anchor_product_intros(kept):
+    """제품 구간(점수 발화로 끝남)마다 제품을 소개한 말과 구성을 설명한 말 하나를 표시한다. 길이 맞추기에서 빼지 않는다.
+
+    1122 원본: "먼저 CU 소금우유는 … 필링까지 캐러멜칩이 들어갔다는데", "마지막은 세븐일레븐의 크림브륄레인데 … 카라멜칩이 들어있고"
+    같은 제품 소개가 전부 빠지고 먹방만 남았다(사용자: '먹방만 넣으면 안 된다').
+    - 소개: 구간의 첫 소개·설명 문장 + 4초 안에 이어 말한 조각(합 5초까지, 제품 이름이 잘리지 않게)
+    - 구성 설명: 구간 안에서 재료·구성 단어가 가장 많은 문장 하나(같으면 짧은 것)
+    마지막 점수 뒤(마무리 잡담)에는 표시하지 않는다.
+    """
+    def spoken(u):   # 문장 안 긴 쉼은 잘리므로 뺀 길이
+        return u['end'] - u['start'] - sum(b - a for a, b in u.get('pauses', []) if u['start'] < a < b < u['end'])
+    speech = sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start']))
+    segments, cur = [], []
+    for u in speech:
+        if cur and cur[-1]['asset_id'] != u['asset_id']:
+            segments.append((cur, False))
+            cur = []
+        cur.append(u)
+        if 'score' in u['labels']:
+            segments.append((cur, True))
+            cur = []
+    for seg, scored in segments:
+        if not scored:
+            continue
+        intro = [u for u in seg if set(u['labels']) & INTRO_LABELS]
+        if not intro:
+            continue
+        chain = [intro[0]]
+        for u in intro[1:]:
+            if u['speech_start'] - chain[-1]['speech_end'] > 4 or sum(map(spoken, chain)) + spoken(u) > 5:
+                break
+            chain.append(u)
+        rest = [u for u in intro if u not in chain and CONTENT.search(u['text'])]
+        if rest:
+            chain.append(max(rest, key=lambda u: (len(CONTENT.findall(u['text'])), -spoken(u))))
+        for u in chain:
+            u['intro_anchor'] = True
+
+
 def _public(u):
     out = {k: u.get(k) for k in ['kind', 'asset_id', 'filename', 'start', 'end', 'role', 'labels', 'text', 'review', 'visual_roles',
                                   'confidence', 'negated', 'numbers', 'product']}
@@ -1002,6 +1113,8 @@ def _reason(u):
         text = ', '.join(LABEL_KO.get(l, l) for l in u['labels'])
         extra = f' · 화면: {", ".join(ROLE_LABEL.get(r, r) for r in u["visual_roles"])}' if u['visual_roles'] else ''
         return f'실제 발화({text}){extra}'
+    if u.get('bite'):
+        return '시식 장면 · 먹는 순간과 표정 반응(얼굴 화면 그대로)'
     if u['kind'] == 'visual' and u.get('overlaid'):
         return f'{ROLE_LABEL.get(u["role"], u["role"])} 장면 · 맛 평가 소리 위에 화면으로 사용'
     if u['kind'] == 'visual':
@@ -1013,7 +1126,7 @@ def _pick_hook(units):
     """단독으로 의미가 유지되는 질문·평가 문장만 후킹으로 올린다(원래 맥락 보호)."""
     best = None
     for u in units[1:]:
-        if u['kind'] != 'speech' or u['confidence'] < .7 or u['review'] or not u['complete']:
+        if u['kind'] != 'speech' or u.get('after_bite') or u['confidence'] < .7 or u['review'] or not u['complete']:
             continue
         if not ({'question', 'taste', 'con', 'pro'} & set(u['labels'])):
             continue
@@ -1089,11 +1202,11 @@ def overlay_eating(kept, window=240.):
     제품을 들어 보이며 소개하는 말, 점수("N점 드릴게요"), 결론은 얼굴이 보이는 원래 화면을 그대로 쓴다.
     얹는 데 쓴 시식 컷은 단독 구간으로는 넣지 않는다(같은 장면이 두 번 나오지 않게).
     """
-    pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES]
+    pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES and not u.get('bite')]
     used, count = set(), 0
     for s in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
         labels = set(s['labels'])
-        if not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro'}:
+        if s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro'}:
             continue
         name = (s.get('product') or {}).get('name')
         best = None
