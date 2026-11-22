@@ -325,3 +325,9 @@ body.scrubbing,body.scrubbing *{cursor:ew-resize!important;user-select:none}
 .studio .timeline-clip.active,.layer-clip.active,.studio .timeline-clip.trimming,.layer-clip.trimming{box-shadow:inset 0 0 0 2px #fff}
 .studio .timeline-clip.trimming,.layer-clip.trimming{z-index:6;transition:none}
 .trim-tip{position:absolute;z-index:8;transform:translateX(-50%);background:#fff;color:#111;font-size:11px;font-weight:600;padding:2px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;box-shadow:0 2px 8px #0008}
+/* 13차: 사각형 선택, 스크롤바 깜빡임 방지 */
+.tl-content{overflow:clip}
+.studio .track-wrap{scrollbar-gutter:stable}
+.marquee{position:absolute;z-index:9;border:1px solid #ffffffcc;background:#ffffff1f;border-radius:2px;pointer-events:none}
+body.marqueeing,body.marqueeing *{user-select:none;cursor:crosshair!important}
+.studio .timeline-clip.multi,.layer-clip.multi{box-shadow:inset 0 0 0 2px #fff!important}

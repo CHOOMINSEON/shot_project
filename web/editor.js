@@ -49,7 +49,7 @@ track().addEventListener('click',e=>{
   if(justDragged){justDragged=false;e.stopImmediatePropagation();e.preventDefault();return;}
   const b=e.target.closest('[data-clip]');if(!b)return;e.stopImmediatePropagation();const i=+b.dataset.clip;
   if(e.shiftKey){if(editMulti.has(i))editMulti.delete(i);else editMulti.add(i);if(!editMulti.has(selected))editMulti.add(selected);draw();return;}
-  editMulti.clear();focusLayer=false;selectedLayer=null;
+  editMulti.clear();layerSel.clear();focusLayer=false;selectedLayer=null;
   const c=project.state.clips[i],r=b.getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),at=snap(c.start+(c.end-c.start)*f);
   if(tool==='blade'&&at>c.start+frame()/2&&at<c.end-frame()/2){hideCut();
     mutate(s=>{const old=s.clips[i];s.clips.splice(i,1,{...old,end:at},{...clone(old),id:uuid(),start:at});})
@@ -156,7 +156,7 @@ const layerLen=l=>l.end-l.start;
 function total(){let t=editedLength();for(const l of layers())t=Math.max(t,l.at+layerLen(l));return Math.max(t,1);}
 function pps(){return Math.max(.0001,(wrap.clientWidth-30)/total())*zoom;}
 const timeAt=clientX=>Math.max(0,(clientX-content.getBoundingClientRect().left)/pps());
-let selectedLayer=null,focusLayer=false;
+let selectedLayer=null,focusLayer=false;const layerSel=new Set();
 // 확대·축소 막대(타임라인 제목 줄 오른쪽)
 const zoomBox=document.createElement('span');zoomBox.className='zoom-box';
 zoomBox.innerHTML='<button type="button" data-zoom="out" title="축소 (Ctrl+휠)">－</button><input type="range" id="tl-zoom" min="0" max="100" step="1" aria-label="타임라인 확대"><button type="button" data-zoom="in" title="확대 (Ctrl+휠)">＋</button><button type="button" data-zoom="fit" title="전체 보기">맞춤</button>';
@@ -193,14 +193,14 @@ function renderLayers(){
     html+=`<div class="tl-row layer-row" data-track="${k}"><canvas class="row-canvas"></canvas><span class="row-no">${k+1}</span>`;
     for(const l of layers().filter(x=>x.track===k)){
       const a=project.assets.find(x=>x.id===l.asset_id),audio=a?.metadata?.has_video===false;
-      html+=`<div class="layer-clip ${audio?'audio':''} ${l.id===selectedLayer?'active':''}" data-layer="${l.id}" title="${esc(l.label||a?.name||'')}"><i class="trim trim-l" data-ltrim="l"></i><span class="clip-head">${audio?'♪ ':''}${esc(l.label||a?.name||'레이어')}</span><i class="trim trim-r" data-ltrim="r"></i></div>`;
+      html+=`<div class="layer-clip ${audio?'audio':''} ${l.id===selectedLayer?'active':''} ${layerSel.has(l.id)?'multi':''}" data-layer="${l.id}" title="${esc(l.label||a?.name||'')}"><i class="trim trim-l" data-ltrim="l"></i><span class="clip-head">${audio?'♪ ':''}${esc(l.label||a?.name||'레이어')}</span><i class="trim trim-r" data-ltrim="r"></i></div>`;
     }
     html+='</div>';
   }
   layerBox.innerHTML=html;
 }
 function layout(){
-  if(!project)return;const p=pps();content.style.width=Math.ceil(total()*p+30)+'px';
+  if(!project)return;const p=pps();content.style.width=Math.floor(total()*p+30)+'px';
   let off=0;track().querySelectorAll('[data-clip]').forEach(el=>{const c=project.state.clips[+el.dataset.clip];if(!c)return;const len=c.end-c.start;
     el.style.left=(off*p)+'px';el.style.width=Math.max(3,len*p-2)+'px';off+=len;});
   renderLayers();
@@ -233,8 +233,38 @@ function startScrub(e){if(e.button!==0||!project?.state.clips.length)return;e.pr
 const handle=document.createElement('b');handle.className='ph-handle';lineHead.appendChild(handle);
 handle.addEventListener('pointerdown',startScrub);ruler.addEventListener('pointerdown',startScrub);
 // 클립이 아닌 빈 곳(기본 줄·레이어 줄 바탕)
-content.addEventListener('pointerdown',e=>{if(scrub||e.target.closest('[data-clip],.layer-clip,.trim,.tl-ruler,.ph-handle'))return;
-  if(!e.target.closest('.tl-row,.tl-layers,#timeline-track')&&e.target!==content)return;startScrub(e);});
+// 빈 곳: 그냥 클릭=그 위치로 이동·멈춤, 누른 채 끌기=사각형으로 여러 클립 선택(캡컷처럼)
+const mbox=document.createElement('div');mbox.className='marquee hidden';content.appendChild(mbox);
+let mq=null;
+content.addEventListener('pointerdown',e=>{if(e.button!==0||scrub||e.target.closest('[data-clip],.layer-clip,.trim,.tl-ruler,.ph-handle'))return;
+  if(!e.target.closest('.tl-row,.tl-layers,#timeline-track')&&e.target!==content)return;
+  e.preventDefault();hideCut();const r=content.getBoundingClientRect();mq={x:e.clientX-r.left,y:e.clientY-r.top,cx:e.clientX,moved:false,add:e.shiftKey||e.ctrlKey||e.metaKey};});
+function marqueeHits(){
+  const b=mbox.getBoundingClientRect(),hit=el=>{const r=el.getBoundingClientRect();return r.right>b.left&&r.left<b.right&&r.bottom>b.top&&r.top<b.bottom;};
+  const clips=new Set(),lays=new Set();
+  track().querySelectorAll('[data-clip]').forEach(el=>{const on=hit(el);el.classList.toggle('multi',on);if(on)clips.add(+el.dataset.clip);});
+  layerBox.querySelectorAll('[data-layer]').forEach(el=>{const on=hit(el);el.classList.toggle('multi',on);if(on)lays.add(el.dataset.layer);});
+  return {clips,lays};
+}
+window.addEventListener('pointermove',e=>{if(!mq)return;const r=content.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+  if(!mq.moved){if(Math.abs(e.clientX-mq.cx)<6)if(Math.abs(y-mq.y)<6)return;mq.moved=true;document.body.classList.add('marqueeing');mbox.classList.remove('hidden');}
+  const w=wrap.getBoundingClientRect();if(e.clientX>w.right-20)wrap.scrollLeft+=14;else if(e.clientX<w.left+20)wrap.scrollLeft-=14;
+  mbox.style.left=Math.min(x,mq.x)+'px';mbox.style.top=Math.min(y,mq.y)+'px';mbox.style.width=Math.abs(x-mq.x)+'px';mbox.style.height=Math.abs(y-mq.y)+'px';marqueeHits();});
+window.addEventListener('pointerup',e=>{if(!mq)return;const m=mq;mq=null;document.body.classList.remove('marqueeing');
+  if(!m.moved){mbox.classList.add('hidden');if(project?.state.clips.length){editMulti.clear();layerSel.clear();seekTo(timeAt(e.clientX));draw();}return;}
+  const {clips,lays}=marqueeHits();mbox.classList.add('hidden');
+  if(!m.add){editMulti.clear();layerSel.clear();}clips.forEach(i=>editMulti.add(i));lays.forEach(id=>layerSel.add(id));
+  selectedLayer=null;focusLayer=layerSel.size>0&&!editMulti.size;
+  if(editMulti.size){const first=Math.min(...editMulti);if(first!==selected)selectClip(first,false);}
+  draw();toast(`${editMulti.size+layerSel.size}개 선택했어요. Del로 삭제해요.`);});
+function selectAll(){editMulti.clear();layerSel.clear();(project?.state.clips||[]).forEach((_,i)=>editMulti.add(i));layers().forEach(l=>layerSel.add(l.id));draw();toast(`전체 ${editMulti.size+layerSel.size}개 선택했어요.`);}
+// 여러 개 삭제(기본 줄 클립 + 레이어 함께)
+function removeMany(){
+  const clips=[...editMulti],lays=[...layerSel];if(!clips.length&&!lays.length)return false;
+  editMulti.clear();layerSel.clear();selectedLayer=null;focusLayer=false;const first=clips.length?Math.min(...clips):selected;
+  return mutate(s=>{s.clips=s.clips.filter((_,i)=>!clips.includes(i));s.layers=(s.layers||[]).filter(l=>!lays.includes(l.id));selected=Math.max(0,Math.min(first,s.clips.length-1));})
+    .then(()=>{if(project.state.clips.length)selectClip(Math.min(first,project.state.clips.length-1),false);toast(`${clips.length+lays.length}개를 삭제했어요.`);});
+}
 window.addEventListener('pointermove',e=>{if(!scrub)return;const r=wrap.getBoundingClientRect();
   if(e.clientX>r.right-20)wrap.scrollLeft+=12;else if(e.clientX<r.left+20)wrap.scrollLeft-=12;
   seekTo(timeAt(e.clientX));});
@@ -318,7 +348,7 @@ function layerClick(l,e){
   const t=timeAt(e.clientX),src=snap(l.start+(t-l.at));
   if(tool==='blade'&&src>l.start+frame()/2&&src<l.end-frame()/2){hideCut();
     return mutate(s=>{const i=s.layers.findIndex(x=>x.id===l.id);if(i<0)return;const old=s.layers[i];const right={...clone(old),id:uuid(),start:src,at:snap(old.at+src-old.start)};old.end=src;s.layers.splice(i+1,0,right);selectedLayer=right.id;}).catch(error=>toast(error.message));}
-  selectedLayer=l.id;focusLayer=true;layout();seekTo(t);
+  editMulti.clear();layerSel.clear();selectedLayer=l.id;focusLayer=true;layout();seekTo(t);draw();
 }
 function removeLayer(){if(!selectedLayer)throw Error('삭제할 레이어를 선택해 주세요.');const id=selectedLayer;selectedLayer=null;focusLayer=false;return mutate(s=>{s.layers=(s.layers||[]).filter(x=>x.id!==id);});}
 
@@ -376,6 +406,7 @@ document.addEventListener('keydown',e=>{
   const p=$('player');
   if(ctrl&&key.toLowerCase()==='z')return run(()=>$(e.shiftKey?'redo':'undo').click());
   if(ctrl&&key.toLowerCase()==='y')return run(()=>$('redo').click());
+  if(ctrl&&key.toLowerCase()==='a')return run(selectAll);
   if(ctrl&&key.toLowerCase()==='d')return run(duplicate);
   if(ctrl&&key.toLowerCase()==='c')return run(copyClips);
   if(ctrl&&key.toLowerCase()==='x')return run(cutClips);
@@ -386,9 +417,9 @@ document.addEventListener('keydown',e=>{
   if(key==='e'||key==='E')return run(splitHere);
   if(key==='q'||key==='Q')return run(trimHead);
   if(key==='w'||key==='W')return run(trimTail);
-  if(key==='Delete'||key==='Backspace')return run(focusLayer&&selectedLayer?removeLayer:removeSelected);
+  if(key==='Delete'||key==='Backspace')return run(()=>(editMulti.size>1||layerSel.size)?removeMany():focusLayer&&selectedLayer?removeLayer():removeSelected());
   if(key===' ')return run(()=>{if(!p.paused)return p.pause();if(!p.src&&project.state.clips.length)seekTo(0);return p.play();});
-  if(key==='ArrowLeft'||key==='ArrowRight')return run(()=>window.timelineScroll((key==='ArrowLeft'?-1:1)*(e.shiftKey?4:1)));
+  if(key==='ArrowLeft'||key==='ArrowRight')return run(()=>window.timelineNudge((key==='ArrowLeft'?-1:1)*(e.shiftKey?1:frame())));
   if(key===','||key==='.'||key==='<'||key==='>')return run(()=>window.timelineNudge((key===','||key==='<'?-1:1)*(e.shiftKey?1:frame())));
   if(key==='ArrowUp'||key==='ArrowDown')return run(()=>window.timelineJump(key==='ArrowUp'?-1:1));
   if(key==='['||key===']')return run(()=>{const n=selected+(key==='['?-1:1);if(project.state.clips[n])selectClip(n,false);});
