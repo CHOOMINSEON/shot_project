@@ -634,11 +634,11 @@ def product_for(frames_in_range, evidence, asset_id):
 
 
 # ------------------------------------------------------------------ 점수·길이
-SENTENCE_WEIGHT = [('score', 10), ('repurchase', 10), ('conclusion', 10), ('compare', 9), ('intro', 8), ('describe', 8), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
+SENTENCE_WEIGHT = [('score', 10), ('repurchase', 10), ('conclusion', 10), ('wrapup', 9.5), ('compare', 9), ('intro', 9), ('describe', 9), ('taste', 8), ('con', 7), ('price', 7), ('pro', 7),
                    ('question', 6), ('cooking', 4)]
 VISUAL_WEIGHT = {'eating': 7, 'crosssection': 6, 'cutting': 5, 'opening': 5, 'packaging': 5, 'cooking': 3}
 MUST_KEEP = {'repurchase', 'conclusion', 'score'}
-LABEL_KO = {'score': '점수', 'repurchase': '재구매 의사', 'conclusion': '결론', 'taste': '맛·식감 평가', 'con': '아쉬운 점', 'price': '가격',
+LABEL_KO = {'score': '점수', 'wrapup': '전체 총평', 'repurchase': '재구매 의사', 'conclusion': '결론', 'taste': '맛·식감 평가', 'con': '아쉬운 점', 'price': '가격',
             'pro': '장점', 'question': '질문', 'intro': '제품 소개', 'describe': '제품 설명', 'compare': '비교', 'cooking': '조리 설명', 'chat': '일반 발화'}
 
 
@@ -898,6 +898,28 @@ def _add_bites(units, sentences, frames, voice, asset, duration):
     return [u for u in units if u['kind'] != 'visual' or not any(u['start'] < y and u['end'] > x for x, y in shown)]
 
 
+def _mark_wrapup(units):
+    """여러 제품 리뷰에서 마지막 점수 뒤 말 = 전체 총평(먹어 본 소감·아쉬운 점·제일 맛있던 것·질문).
+
+    사용자 직접 편집본 1123(원본과 소리 대조): 마지막 점수 뒤 '네 가지 다 먹어봤는데 맛은 있거든요? … 편의점 네 군데를
+    돌아서 사야 된다는 게 별로 … 묶어서 판매해 주세요 … 제일 맛있었던 건 소금우유 … 여러분은?'을 거의 다 썼다(약 25초).
+    이전 자동 편집은 이 말들을 '일반 발화'로 보고 길이 때문에 전부 뺐다.
+    """
+    by_asset = {}
+    for u in units:
+        if u['kind'] == 'speech':
+            by_asset.setdefault(u['asset_id'], []).append(u)
+    for items in by_asset.values():
+        scores = [u for u in items if 'score' in u['labels']]
+        if len(scores) < 2:
+            continue
+        last = max(u['speech_end'] for u in scores)
+        for u in items:
+            if u['speech_start'] > last and not u['drop'] and not set(u['labels']) & MUST_KEEP:
+                u['labels'] = ['wrapup'] + [l for l in u['labels'] if l != 'chat']
+                u['role'] = 'wrapup'
+
+
 # ------------------------------------------------------------------- 메인 계획
 def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambda: None):
     """assets: 영상 원본 리스트(분석 포함). 반환: clips, report."""
@@ -918,6 +940,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                           'review': ['분석 없음 · 직접 확인']})
             continue
         units += _units_for_asset(asset, frames_by_asset.get(asset['id'], []), evidence, rules, notes)
+    _mark_wrapup(units)
 
     kept = []
     for u in units:
@@ -1065,16 +1088,22 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant'):
         missing.append('먹는 장면 후보를 찾지 못했어요.')
 
-    broll = _detail_shots(assets, frames_by_asset, evidence) if rules.get('bites') and not scene_mode else []
-    if broll:
-        laid = _overlay_details(kept, broll)
-        if laid:
-            notes.append(f'제품 설명·맛 평가 발화 위에 따로 찍은 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 화면 제품이 맞는지 확인하세요.')
+    names = auto_products(kept) if rules.get('bites') and not scene_mode else {}
+    if names:
+        for u, k in _product_blocks(kept):
+            if k in names and not u.get('product'):
+                u['auto_product'] = names[k][0]
+    broll = _detail_shots(assets, frames_by_asset, evidence, names) if rules.get('bites') and not scene_mode else []
+    # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
     if rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
         pieces = _opening_lineup(kept[0], broll, fps) if broll else []
         if pieces:
             kept[0]['montage'] = pieces
-            notes.append(f'첫 멘트 아래에 제품 포장·들어 보이기 컷 {len(pieces)}개를 이어 붙였어요(완성본 1123 방식).')
+            notes.append(f'첫 멘트 아래에 제품 여러 개를 들어 보이는 컷 {len(pieces)}개를 이어 붙였어요(직접 편집본 1123 방식).')
+    if broll:
+        laid = _overlay_details([u for u in kept if not u.get('montage')], broll)
+        if laid:
+            notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품은 말한 이름과 포장 글자로 맞췄어요.')
     kept = _cut_pauses(kept)   # 문장 안 긴 쉼 줄이기(해석 영상은 모든 쉼, 그 외는 0.5초 넘는 쉼)
     clips = _merge_clips(kept, assets, rules, fps)
     overlays = []
@@ -1243,7 +1272,7 @@ def hook_montage(hook, shots, fps=30, fast_piece=.28, max_fast=5):
 DETAIL_TAKE = (8, .03)   # 단어 8개 미만·말소리 3% 미만인 영상 = 따로 찍은 디테일 컷(제품·포장·단면)
 DETAIL_SHOW = (.8, 1.4)  # 디테일 컷 하나를 보여 주는 길이(완성본 1123 실측 0.75~1.5초)
 DETAIL_LABELS = {'describe', 'intro', 'compare', 'taste', 'pro', 'con', 'price'}
-FACE_LABELS = {'score', 'conclusion', 'repurchase', 'question'}
+FACE_LABELS = {'score', 'conclusion', 'repurchase', 'question', 'wrapup'}
 
 
 def _product_blocks(kept):
@@ -1256,13 +1285,85 @@ def _product_blocks(kept):
     return blocks
 
 
-def _detail_shots(assets, frames_by_asset, evidence):
-    """말소리가 거의 없는 '디테일 컷' 영상에서 쓸 만한 장면(0.8초 이상)을 고르고, 제품 근거가 있으면 제품을 붙인다.
+NAME_STOP = {'먼저', '마지막', '마지막은', '다음', '다음은', '이건', '이거', '오늘', '오늘은', '편의점', '초콜릿', '다크', '밀크', '가나', '프리미엄',
+             '제품', '그리고', '이렇게', '진짜', '완전', '이마트', '세븐일레븐', '씨유', '지에스', '모양', '똑같아요', '겉은', '안에는', '속에는', '들어갔습니다', '들어갔다는데', '들어있고', '들어가서'}
+JOSA = ('부터는', '부터', '인데', '에는', '이라', '이에요', '예요', '은', '는', '이', '가', '도', '의', '에', '를', '을')
+
+
+def _name_tokens(text):
+    out = []
+    for raw in re.findall(r'[가-힣A-Za-z0-9]+', text):
+        word = re.sub(r'[^가-힣]', '', raw)
+        for j in JOSA:
+            if word.endswith(j) and len(word) - len(j) >= 2:
+                word = word[:-len(j)]
+                break
+        if len(word) >= 2 and word not in NAME_STOP:
+            out.append(word)
+    return out
+
+
+def _bigrams(text):
+    t = re.sub(r'[^가-힣]', '', text)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def auto_products(kept):
+    """등록한 제품이 없을 때: 제품마다(점수로 나눈 구간) 소개·설명 말에서 이름 후보를 뽑는다 → {구간: (이름, 그 구간만의 글자쌍)}.
+
+    1122 가나 프리미엄 프로젝트는 제품 등록이 없어 디테일 컷 제품 근거가 하나도 없었다. 사용자 편집본 1123을 원본과 맞춰 보니
+    디테일 컷은 정확히 말하는 제품 것만 썼다(소금우유 설명 위 = 소금우유 상자). 포장 글자 인식(OCR)은 저화질에서도
+    '호지지'(호지차), '허니어'(허니페어)처럼 일부를 읽으므로, 말한 이름과 겹치는 글자쌍으로 제품을 붙인다.
+    """
+    tokens, firsts, scored = {}, {}, set()
+    for u, k in _product_blocks(kept):
+        if 'score' in u['labels']:
+            scored.add(k)
+        if set(u['labels']) & INTRO_LABELS:
+            words = _name_tokens(u['text'])
+            tokens.setdefault(k, []).extend(words)
+            if len(firsts.setdefault(k, [])) < 4:
+                firsts[k].extend(words)
+    tokens = {k: v for k, v in tokens.items() if k in scored}   # 마지막 점수 뒤 총평은 제품 구간이 아님
+    grams = {k: set().union(*(_bigrams(t) for t in v)) for k, v in tokens.items() if v}
+    result = {}
+    for k in grams:
+        others = set().union(*(g for j, g in grams.items() if j != k)) if len(grams) > 1 else set()
+        unique = grams[k] - others
+        pool = firsts.get(k) or tokens[k]
+        name = next((t for t in pool if len(_bigrams(t) & unique) >= 2), None) or max(pool, key=lambda t: (len(_bigrams(t) & unique), len(t)))
+        mark = _bigrams(name) & unique
+        if mark:
+            result[k] = (name, mark)
+    return result
+
+
+MULTI = '__여러 제품__'
+
+
+def _frame_product(row, evidence, asset_id, names):
+    found = product_for([row], evidence or {}, asset_id)
+    if found:
+        return found['name']
+    if not names:
+        return None
+    text = ''.join(o.get('text', '') for o in row.get('ocr') or [])
+    got = _bigrams(text)
+    hits = sorted(((len(got & g), name) for name, g in names.values()), reverse=True)
+    if len(hits) > 1 and hits[1][0] >= 1:
+        return MULTI   # 상자 여러 개가 함께 보임(제품 모아 보여 주기) → 한 제품 설명에는 쓰지 않고 첫 장면 후보
+    if hits and hits[0][0] >= 1:
+        return hits[0][1]
+    return None
+
+
+def _detail_shots(assets, frames_by_asset, evidence, names=None):
+    """말소리가 거의 없는 '디테일 컷' 영상을 0.8~1.2초 장면으로 나누고, 제품 근거(등록 제품 또는 말한 이름과 포장 글자)를 붙인다.
 
     완성본 1123(가나 프리미엄 4종) 역추출: 화면 시간의 약 35%가 따로 찍은 디테일 컷(포장·개봉·단면, 0.75~1.5초)이었고
-    첫 10초는 제품 4종을 들어 보이는 컷, 그 뒤로는 제품 소개·맛 평가 발화 위에 같은 제품 컷이 얹혀 있었다.
-    이전 자동 편집은 이 영상들을 한 번도 쓰지 않았다(전부 길이 때문에 빠짐).
-    제품은 OCR·등록한 참고 사진 근거로만 붙인다. CLIP 평균·색으로 실제 원본에서 시험했을 때 제품을 거의 못 맞혔다(12개 중 1~3개).
+    첫 10초는 제품 4종을 들어 보이는 컷, 그 뒤로는 제품 소개·설명 발화 위에 같은 제품 컷이 얹혀 있었다.
+    디테일 영상은 한 번에 이어 찍어 장면 전환이 없으므로(원본 260초 = 장면 1개) 장면 단위가 아니라 시간 단위로 나눈다.
+    제품을 한 상자씩 이어서 찍으므로, 같은 제품 근거 사이(25초 이내) 구간도 그 제품으로 본다.
     """
     speaking = [a for a in assets if a['metadata'].get('has_video', True) and len(a['analysis'].get('words', [])) >= DETAIL_TAKE[0]]
     details = [a for a in assets if a['metadata'].get('has_video', True) and a not in speaking
@@ -1271,26 +1372,40 @@ def _detail_shots(assets, frames_by_asset, evidence):
         return []
     shots = []
     for a in details:
-        by_shot = {}
-        for r in frames_by_asset.get(a['id'], []):
-            by_shot.setdefault(r['shot'], []).append(r)
-        for rows in by_shot.values():
-            rows.sort(key=lambda r: r['start'])
-            start, end = rows[0]['start'], rows[-1]['end']
-            if end - start < DETAIL_SHOW[0]:
-                continue
-            tags = {}
-            for r in rows:
-                for tag, v in (r.get('tags') or {}).items():
-                    tags[tag] = max(tags.get(tag, 0), v)
-            found = product_for(rows, evidence or {}, a['id'])
-            role = next((r for r in ['crosssection', 'opening', 'packaging', 'cutting'] if r in tags or (r == 'crosssection' and 'cream' in tags)), 'packaging')
-            shots.append({'asset_id': a['id'], 'start': start, 'end': end, 'role': role, 'lineup': False,
-                          'product': found['name'] if found else None, 'used': False})
+        rows = sorted(frames_by_asset.get(a['id'], []), key=lambda r: r['start'])
+        labels = [_frame_product(r, evidence, a['id'], names) for r in rows]
+        multi = [r['start'] for r, p in zip(rows, labels) if p == MULTI]
+        labels = [MULTI if p and p != MULTI and any(abs(r['start'] - t) <= 1.5 for t in multi) else p for r, p in zip(rows, labels)]
+        for i, p in enumerate(list(labels)):
+            if p and p != MULTI:   # 근거 한 장면 앞뒤 3초(같은 장면)는 같은 상자
+                for m in range(len(rows)):
+                    if not labels[m] and rows[m]['shot'] == rows[i]['shot'] and abs(rows[m]['start'] - rows[i]['start']) <= 3:
+                        labels[m] = p
+        known = [(i, p) for i, p in enumerate(labels) if p and p != MULTI]
+        for (i, p), (j, q) in zip(known, known[1:]):
+            if p == q and rows[j]['start'] - rows[i]['start'] <= 25:
+                for m in range(i + 1, j):
+                    labels[m] = labels[m] or p
+        i = 0
+        while i < len(rows):
+            j = i
+            while j + 1 < len(rows) and labels[j + 1] == labels[i] and rows[j + 1]['shot'] == rows[i]['shot'] \
+                    and rows[j + 1]['start'] - rows[i]['start'] < DETAIL_SHOW[1]:
+                j += 1
+            start, end = rows[i]['start'], rows[j]['end']
+            if end - start >= DETAIL_SHOW[0] and labels[i] != MULTI:
+                tags = {}
+                for r in rows[i:j + 1]:
+                    for tag, v in (r.get('tags') or {}).items():
+                        tags[tag] = max(tags.get(tag, 0), v)
+                role = next((r for r in ['crosssection', 'opening', 'packaging', 'cutting'] if r in tags or (r == 'crosssection' and 'cream' in tags)), 'packaging')
+                shots.append({'asset_id': a['id'], 'start': start, 'end': end, 'role': role, 'lineup': False,
+                              'product': labels[i], 'used': False})
+            i = j + 1
         # 여러 제품을 한꺼번에 들어 보이는 순간(CLIP '비교' 태그) → 첫 장면 후보. 3초 안에 이어지면 한 장면.
         moments = []
-        for r in sorted(frames_by_asset.get(a['id'], []), key=lambda r: r['start']):
-            if 'comparison' in (r.get('tags') or {}):
+        for r, label in zip(rows, labels):
+            if 'comparison' in (r.get('tags') or {}) or label == MULTI:
                 if moments and r['start'] - moments[-1][1] <= 3:
                     moments[-1][1] = r['end']
                 else:
@@ -1304,7 +1419,7 @@ def _overlay_details(kept, shots):
     """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 점수·결론·시식 직후 반응은 얼굴."""
     count = 0
     for u, k in _product_blocks(kept):
-        name = (u.get('product') or {}).get('name')
+        name = (u.get('product') or {}).get('name') or u.get('auto_product')
         labels = set(u['labels'])
         if u.get('overlay') or u.get('after_bite') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
             continue

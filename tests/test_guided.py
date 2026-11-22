@@ -746,3 +746,27 @@ def test_eating_overlay_never_crosses_into_the_next_product():
     result, _, _ = run(words, frames=frames, duration=60)
     taste = [c for c in result['clips'] if c['start'] < 24 and c['end'] > 20]
     assert not any(c.get('visual_start', c['start']) >= 32 for c in taste), taste
+
+
+def test_auto_products_names_each_product_from_its_intro_and_matches_box_text():
+    # 제품 등록이 없어도: 점수로 나뉜 제품 구간마다 소개 말에서 이름을 뽑고, 디테일 컷 포장 글자(OCR)와 맞춘다.
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿에 캐러멜칩이 들어갔대요.', 10, 14), w(2, ' 이건 8점 드릴게요.', 20, 22),
+             w(3, ' 다음은 호지차인데 겉에 녹차 파우더가 묻어 있어요.', 30, 34), w(4, ' 이건 6점 드릴게요.', 40, 42),
+             w(5, ' 둘 다 맛은 있는데 묶어서 팔아 주세요.', 50, 53)]
+    v = asset(words, 60)
+    d = asset([], 40, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text):
+        r = frame(i, t, t + .5, {'packaging': .3}, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(1, 2, 'PREMIUM 호지지'), row(2, 2.5, ''), row(3, 3, 'Ghana'), row(4, 20, '소금우유'), row(5, 20.5, 'Cafe'), row(6, 21, ''),
+              row(7, 30, '소금우유 호지차')]   # 상자 두 개가 함께 보이면 어느 한 제품 컷으로 쓰지 않는다
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+    laid = {round(c['start']): c['visual_start'] for c in result['clips'] if c.get('visual_asset_id') == 'd'}
+    salt = [vs for s, vs in laid.items() if s < 16]
+    hoji = [vs for s, vs in laid.items() if 28 < s < 36]
+    assert salt and all(19 <= x <= 22 for x in salt), laid
+    assert hoji and all(1 <= x <= 4 for x in hoji), laid
+    assert not any(29 <= x <= 31 for x in laid.values())
