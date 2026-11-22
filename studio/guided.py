@@ -173,7 +173,7 @@ KEEP_WORDS = [('packaging', r'포장|제품명|패키지|간판|이름'), ('open
 DROP_WORDS = [('prep', r'준비|카메라'), ('repeat', r'반복'), ('retake', r'말실수'), ('silence', r'무음|대기')]
 ORDER_WORDS = [('intro', r'제품 소개|소개'), ('opening', r'개봉'), ('crosssection', r'내용물|단면'),
                ('eating', r'시식|먹|체험'), ('taste', r'평가'), ('conclusion', r'결론')]
-UNSUPPORTED = ['음악', '효과음', '전환 효과', '얼굴 추적', '줌인', '자막 스타일', '속도', '배속']
+UNSUPPORTED = ['음악', '효과음', '전환 효과', '얼굴 추적', '줌인', '자막 스타일']
 
 
 SCENE_STOP = {'장면', '화면', '구간', '우선으로', '골라줘', '그대로', '살리고', '자르지', '끝날', '때까지', '현장음', '바로',
@@ -393,6 +393,12 @@ def parse_guideline(text, style='oneshot'):
         rules['applied'] += ['문장 사이·문장 안의 무음 제거', '여러 번 말한 문장은 가장 잘 말한 한 번만', '말한 순서 그대로 · 길이 맞추려고 빼지 않음']
     food = style in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant')
     rules['bites'] = food   # 먹방: 먹는 화면 위에 바로 뒤 소감 목소리를 깐다(시식 나레이션)
+    # 목표 길이는 '완성본(배속 후)' 길이다. 사용자는 캡컷에서 배속을 건다(완성본 1123: 1.3배속, 1116: 1.4배속).
+    # 그래서 원본에서 남길 분량 = 목표 × 배속. 이전엔 배속 전 길이로 맞춰 맛 평가 문장이 너무 많이 빠졌다(1123 대비 6문장).
+    m = re.search(r'(\d(?:\.\d+)?)\s*배(?:속)?', text)
+    rules['playback'] = float(m[1]) if m and 1 <= float(m[1]) <= 2 else (1.0 if re.search(r'배속\s*(없|안|하지)', text) or not food else 1.3)
+    if rules['playback'] != 1:
+        rules['applied'].append(f'목표 길이는 {rules["playback"]:g}배속 후 기준 · 원본 분량 {rules["target"][0] * rules["playback"]:.0f}~{rules["target"][1] * rules["playback"]:.0f}초 남김(배속은 캡컷에서)')
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
     if rules['overlay_eating']:
@@ -865,7 +871,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     frames_by_asset = frames_by_asset or {}
     evidence = evidence or {}
     style = STYLES[rules['style']]
-    target_min, target_max = rules['target']
+    target_min, target_max = (round(t * rules.get('playback', 1), 1) for t in rules['target'])   # 원본 기준 분량
     units, removed, notes = [], [], []
     for asset in assets:
         check()
@@ -951,6 +957,13 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             s = sentence_score(u)
             if u['review']:
                 s -= .5
+            # 완성본 1123에서 사용자가 남긴 평가 = 자기 취향·이유가 담긴 문장("저는 크런키한 식감이 좋더라고요",
+            # "진짜 꿀이랑 배맛이 너무 잘 나는데요?", "묶어서 판매해주세요"). 뺀 문장 = "맛있다." 같은 두세 단어 감탄.
+            if set(u['labels']) & {'taste', 'pro', 'con'}:
+                if OPINION.search(u['text']):
+                    s += 1.5
+                elif len(u['text'].split()) <= 2:
+                    s -= 1.5
             return s
         return VISUAL_WEIGHT.get(u['role'], 1) if u['role'] in rules['keep'] else 1
 
@@ -1019,12 +1032,16 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant'):
         missing.append('먹는 장면 후보를 찾지 못했어요.')
 
+    broll = _detail_shots(assets, frames_by_asset, evidence) if rules.get('bites') and not scene_mode else []
+    if broll:
+        laid = _overlay_details(kept, broll)
+        if laid:
+            notes.append(f'제품 설명·맛 평가 발화 위에 따로 찍은 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 화면 제품이 맞는지 확인하세요.')
     if rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
-        shots = build_shots(frames_by_asset.get(kept[0]['asset_id'], []))
-        pieces = hook_montage(kept[0], shots, fps)
+        pieces = _opening_lineup(kept[0], broll, fps) if broll else []
         if pieces:
             kept[0]['montage'] = pieces
-            notes.append(f'후킹 멘트 아래에 제품 장면 {len(pieces)}컷을 빠르게 얹었어요(완성본 1116 방식). 화면이 맞는지 확인하세요.')
+            notes.append(f'첫 멘트 아래에 제품 포장·들어 보이기 컷 {len(pieces)}개를 이어 붙였어요(완성본 1123 방식).')
     kept = _cut_pauses(kept)   # 문장 안 긴 쉼 줄이기(해석 영상은 모든 쉼, 그 외는 0.5초 넘는 쉼)
     clips = _merge_clips(kept, assets, rules, fps)
     overlays = []
@@ -1053,6 +1070,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
 
 
 INTRO_LABELS = {'describe', 'intro', 'compare'}
+OPINION = re.compile(r'저는|제가|진짜|너무|제일|좋더라|좋아하|괜찮겠|해\s*주세요|했으면|아쉬|궁금')
 CONTENT = re.compile(r'들어[가갔있간]|코팅|필링|토핑|크림|칩|시럽|함량|겉은|안에는|속에는')
 
 
@@ -1189,6 +1207,123 @@ def hook_montage(hook, shots, fps=30, fast_piece=.28, max_fast=5):
     return pieces if len(pieces) >= 2 else []
 
 
+DETAIL_TAKE = (8, .03)   # 단어 8개 미만·말소리 3% 미만인 영상 = 따로 찍은 디테일 컷(제품·포장·단면)
+DETAIL_SHOW = (.8, 1.4)  # 디테일 컷 하나를 보여 주는 길이(완성본 1123 실측 0.75~1.5초)
+DETAIL_LABELS = {'describe', 'intro', 'compare', 'taste', 'pro', 'con', 'price'}
+FACE_LABELS = {'score', 'conclusion', 'repurchase', 'question'}
+
+
+def _product_blocks(kept):
+    """발화 순서대로 제품 구간을 나눈다: 'N점 드릴게요'(점수)가 나오면 다음 제품."""
+    blocks, k = [], 0
+    for u in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
+        blocks.append((u, k))
+        if 'score' in u['labels']:
+            k += 1
+    return blocks
+
+
+def _detail_shots(assets, frames_by_asset, evidence):
+    """말소리가 거의 없는 '디테일 컷' 영상에서 쓸 만한 장면(0.8초 이상)을 고르고, 제품 근거가 있으면 제품을 붙인다.
+
+    완성본 1123(가나 프리미엄 4종) 역추출: 화면 시간의 약 35%가 따로 찍은 디테일 컷(포장·개봉·단면, 0.75~1.5초)이었고
+    첫 10초는 제품 4종을 들어 보이는 컷, 그 뒤로는 제품 소개·맛 평가 발화 위에 같은 제품 컷이 얹혀 있었다.
+    이전 자동 편집은 이 영상들을 한 번도 쓰지 않았다(전부 길이 때문에 빠짐).
+    제품은 OCR·등록한 참고 사진 근거로만 붙인다. CLIP 평균·색으로 실제 원본에서 시험했을 때 제품을 거의 못 맞혔다(12개 중 1~3개).
+    """
+    speaking = [a for a in assets if a['metadata'].get('has_video', True) and len(a['analysis'].get('words', [])) >= DETAIL_TAKE[0]]
+    details = [a for a in assets if a['metadata'].get('has_video', True) and a not in speaking
+               and sum(b - a0 for a0, b in a['analysis'].get('speech') or []) < DETAIL_TAKE[1] * a['metadata'].get('duration', 1)]
+    if not details or not speaking:
+        return []
+    shots = []
+    for a in details:
+        by_shot = {}
+        for r in frames_by_asset.get(a['id'], []):
+            by_shot.setdefault(r['shot'], []).append(r)
+        for rows in by_shot.values():
+            rows.sort(key=lambda r: r['start'])
+            start, end = rows[0]['start'], rows[-1]['end']
+            if end - start < DETAIL_SHOW[0]:
+                continue
+            tags = {}
+            for r in rows:
+                for tag, v in (r.get('tags') or {}).items():
+                    tags[tag] = max(tags.get(tag, 0), v)
+            found = product_for(rows, evidence or {}, a['id'])
+            role = next((r for r in ['crosssection', 'opening', 'packaging', 'cutting'] if r in tags or (r == 'crosssection' and 'cream' in tags)), 'packaging')
+            shots.append({'asset_id': a['id'], 'start': start, 'end': end, 'role': role, 'lineup': False,
+                          'product': found['name'] if found else None, 'used': False})
+        # 여러 제품을 한꺼번에 들어 보이는 순간(CLIP '비교' 태그) → 첫 장면 후보. 3초 안에 이어지면 한 장면.
+        moments = []
+        for r in sorted(frames_by_asset.get(a['id'], []), key=lambda r: r['start']):
+            if 'comparison' in (r.get('tags') or {}):
+                if moments and r['start'] - moments[-1][1] <= 3:
+                    moments[-1][1] = r['end']
+                else:
+                    moments.append([r['start'], r['end']])
+        shots += [{'asset_id': a['id'], 'start': m0 - .5, 'end': m1 + .5, 'role': 'packaging', 'lineup': True,
+                   'product': None, 'used': False} for m0, m1 in moments]
+    return sorted(shots, key=lambda s: (s['asset_id'], s['start']))
+
+
+def _overlay_details(kept, shots):
+    """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 점수·결론·시식 직후 반응은 얼굴."""
+    count = 0
+    for u, k in _product_blocks(kept):
+        name = (u.get('product') or {}).get('name')
+        labels = set(u['labels'])
+        if u.get('overlay') or u.get('after_bite') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
+            continue
+        talk = u['end'] - u['start']
+        if talk < 1.6:
+            continue
+        pool = [s for s in shots if not s['used'] and name and s['product'] == name]
+        if not pool:
+            continue
+        # 설명(구성·속·단면) 말에는 개봉·단면 컷, 소개에는 포장 컷을 먼저
+        want = ['crosssection', 'opening'] if labels & {'describe', 'taste', 'pro', 'con'} else ['packaging', 'opening']
+        pool.sort(key=lambda s: (s['role'] not in want, s['start']))
+        s = pool[0]
+        take = min(DETAIL_SHOW[1], s['end'] - s['start'], talk - .8)
+        if take < DETAIL_SHOW[0]:
+            continue
+        mid = (s['start'] + s['end'] - take) / 2
+        u['overlay'] = {'start': mid, 'end': mid + take, 'role': s['role'], 'asset_id': s['asset_id']}
+        s['used'] = True
+        count += 1
+    return count
+
+
+def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):
+    """첫 멘트 아래 제품 포장·들어 보이기 컷을 0.8~1.2초씩 잇는다(얼굴은 첫 멘트 끝 0.6초에 돌아온다).
+
+    완성본 1123: 첫 10초가 제품 4종을 들어 보이는 컷과 포장 컷(0.5~1.5초)이었고, 이전 자동 편집처럼 같은 단어를
+    0.28초 조각으로 쪼개 화면만 바꾸는 방식은 없었다(사용자: '초반에 왜 그럼').
+    """
+    length = hook['end'] - hook['start'] - .6
+    if length < 2 * piece[0]:
+        return []
+    # 첫 멘트는 보통 특정 제품 이야기라, 여러 제품을 함께 들어 보이는 컷만 쓴다(한 제품 포장 컷은 다른 제품을 말할 때 섞일 수 있음).
+    picked = sorted((s for s in shots if not s['used'] and s['lineup']), key=lambda s: (s['asset_id'], s['start']))
+    step = 1 / fps
+    snap = lambda x: round(x / step) * step
+    pieces, t = [], snap(hook['start'])
+    for s in picked:
+        room = hook['start'] + length - t
+        if room < piece[0]:
+            break
+        take = min(piece[1], s['end'] - s['start'], room)
+        if take < piece[0]:
+            continue
+        end = snap(t + take)
+        v0 = (s['start'] + s['end'] - (end - t)) / 2
+        pieces.append((t, end, v0, s['role'], s['asset_id']))
+        s['used'] = True
+        t = end
+    return pieces if len(pieces) >= 2 else []
+
+
 def overlay_eating(kept, window=240.):
     """맛 평가 발화 위에 가까운 '말 없는 시식·단면 컷'을 화면으로 얹는다(소리는 발화 그대로).
 
@@ -1286,10 +1421,10 @@ def _merge_clips(kept, assets, rules, fps):
         if u.get('montage'):
             if cur:
                 clips.append(cur)
-            for a0, a1, v0, role in u['montage']:
+            for a0, a1, v0, role, *vid in u['montage']:
                 clips.append({'asset_id': u['asset_id'], 'start': a0, 'end': a1, 'frame': frame,
-                              'visual_asset_id': u['asset_id'], 'visual_start': v0, 'visual_end': v0 + (a1 - a0),
-                              'guided': {'units': [{**_brief(u), 'reason': '후킹 몽타주 · 화면은 ' + ROLE_LABEL.get(role, role) + ' 컷'}]}})
+                              'visual_asset_id': vid[0] if vid else u['asset_id'], 'visual_start': v0, 'visual_end': v0 + (a1 - a0),
+                              'guided': {'units': [{**_brief(u), 'reason': '첫 장면 · 화면은 ' + ROLE_LABEL.get(role, role) + ' 컷'}]}})
             last = u['montage'][-1][1]
             cur = {'asset_id': u['asset_id'], 'start': last, 'end': u['end'], 'frame': frame,
                    'guided': {'units': [_brief(u)]}} if u['end'] - last >= 1 / fps else None
@@ -1303,7 +1438,7 @@ def _merge_clips(kept, assets, rules, fps):
             whole = (u['end'] - u['start']) - take < .4
             split = u['end'] if whole else u['start'] + take
             clips.append({'asset_id': u['asset_id'], 'start': u['start'], 'end': split, 'frame': frame,
-                          'visual_asset_id': u['asset_id'], 'visual_start': over['start'], 'visual_end': over['end'],
+                          'visual_asset_id': over.get('asset_id', u['asset_id']), 'visual_start': over['start'], 'visual_end': over['end'],
                           'guided': {'units': [{**_brief(u), 'reason': _reason(u) + (' · 먹는 화면 위 소감 나레이션' if over.get('narration') else f' · 화면은 {ROLE_LABEL.get(over["role"], over["role"])} 컷')}]}})
             cur = None if whole else {'asset_id': u['asset_id'], 'start': split, 'end': u['end'], 'frame': frame,
                                       'guided': {'units': [_brief(u)]}}
