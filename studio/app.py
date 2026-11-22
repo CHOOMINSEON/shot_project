@@ -763,6 +763,27 @@ def guided_edit(ident: str, body: GuidedEdit, request: Request):
     return {'job_id': job_id}
 
 
+@app.get('/api/style-profile')
+def style_profile():
+    return {'profile': guided.load_profile()}
+
+
+@app.post('/api/projects/{ident}/style-profile')
+def learn_style_profile(ident: str):
+    """직접 다듬은 편집본의 컷 길이 습관을 학습해 앱 전체(이후 모든 자동 편집)에 저장."""
+    current = project(ident)
+    learned = guided.learn_profile(current['state'], current['assets'])
+    if not learned:
+        raise HTTPException(422, '타임라인에 컷이 3개 이상 있어야 내 편집 스타일을 학습할 수 있어요.')
+    return {'profile': guided.save_profile(learned, current['name'])}
+
+
+@app.delete('/api/style-profile')
+def clear_style_profile():
+    guided.clear_profile()
+    return {'profile': None}
+
+
 class NarrationLink(BaseModel):
     revision: StrictInt
     line: StrictInt = Field(ge=0, le=500)

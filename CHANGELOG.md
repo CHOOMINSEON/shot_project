@@ -1,3 +1,7 @@
+# 내 편집 스타일 학습 버튼
+
+편집 지침 화면에 ‘이 편집본으로 내 편집 스타일 학습’ 버튼을 추가했습니다. 직접 다듬은 타임라인(컷 3개 이상)의 컷 길이 습관(`guided.learn_profile`)을 앱 전체(`style_profile.json`)에 저장하고, 이후 모든 프로젝트의 지침 자동 편집이 이를 반영합니다(말 없는 컷 최대 길이 = 보통 컷 × 1.5, 2~8초, 원샷 유형 제외). 버튼 아래에 학습 결과를 보여 주고 ‘학습한 스타일 지우기’로 초기화할 수 있습니다. API: `GET/DELETE /api/style-profile`, `POST /api/projects/{id}/style-profile`.
+
 # 편집 지침 기반 자동 편집 추가
 
 `studio/guided.py`(규칙 기반 지침 해석·구간 선택·나레이션 연결), `studio/exports.py`(EDL·FCPXML·가져오기 순서), 워커 작업 `guided_edit`, API `/guided-edit`·`/guided-edit/{job}/narration`, 새 첫 화면(`web/guided.js`)을 추가했습니다. 기존 대본 매칭은 고급 메뉴로 옮겼습니다. Whisper/CLIP의 GPU 자동 선택(실패 시 CPU)을 추가했습니다. 자세한 사용법과 한계는 README와 VALIDATION을 참고하세요.
