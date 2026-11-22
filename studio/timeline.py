@@ -215,7 +215,7 @@ def voice_words(asset):
     voice = [(float(a), float(b)) for a, b in (analysis.get('speech') or []) if b > a]
     if not voice or not words:
         return [dict(w) for w in words]
-    from .guided import snap_to_voice
+    from .guided import skip_swallowed, snap_to_voice
     groups, bucket = [], []
     for word in words:
         if bucket and (word['start'] - bucket[-1]['end'] > .7 or word['end'] - bucket[0]['start'] > 12):
@@ -233,6 +233,8 @@ def voice_words(asset):
         start, end = float(group[0]['start']), float(group[-1]['end'])
         nxt = float(groups[i + 1][0]['start']) if i + 1 < len(groups) else duration
         s0, s1, gaps = snap_to_voice(start, end, voice, prev_end, nxt)
+        if gaps:   # 자동 편집이 빼는 '받아 적지 않은 반복' 구간에는 자막 단어를 펼치지 않는다
+            s0, gaps = skip_swallowed(s0, s1, gaps, [(float(w['start']), float(w['end'])) for w in group])
         pieces, cursor = [], s0
         for a, b in gaps:
             pieces.append((cursor, a))

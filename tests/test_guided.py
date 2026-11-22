@@ -711,3 +711,26 @@ def test_length_trim_keeps_opinion_over_bare_exclamation():
     assert any('좋더라고요' in x for x in texts)
     gone = [r['text'] for r in result['removed'] if r['reason_code'] == 'length']
     assert gone and sum('맛있다' in x for x in gone) >= sum('좋더라고요' in x for x in gone)
+
+
+def test_untranscribed_repeat_inside_a_sentence_is_cut():
+    # 실제 원본 134~144초: '필링까지'가 8초짜리 한 단어로 찍혔고 그 사이 목소리 구간은 같은 말을 다시 시작한 부분(두 번 들림).
+    a = asset([], 160)
+    a['analysis']['words'] = [{'id': 'a', 'text': ' 필링까지', 'start': 133.24, 'end': 141.58, 'confidence': .9},
+                              {'id': 'b', 'text': ' 캐러멜칩이', 'start': 141.58, 'end': 143.46, 'confidence': .9},
+                              {'id': 'c', 'text': ' 들어갔다는데.', 'start': 143.46, 'end': 144.78, 'confidence': .9}]
+    a['analysis']['speech'] = [[134.84, 135.03], [135.35, 136.63], [138.42, 139.67], [140.31, 141.56], [142.81, 144.31]]
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    result = guided.plan([a], rules, {'v': []}, {})
+    heard = []
+    for c in result['clips']:
+        heard += [(x0, x1) for x0, x1 in a['analysis']['speech'] if c['start'] < x1 and c['end'] > x0]
+    assert (138.42, 139.67) in [tuple(x) for x in heard] and (142.81, 144.31) in [tuple(x) for x in heard]
+    assert not any(x0 < 137 for x0, _ in heard), result['clips']     # 앞의 반복 시도는 빠짐
+
+
+def test_skip_swallowed_keeps_pieces_where_other_words_start():
+    # '저는 크런키한(1.7초) 식감이 좋더라고요': 두 구간 모두 다른 단어가 시작하므로 하나도 빼지 않는다.
+    s0, gaps = guided.skip_swallowed(1127.77, 1131.1, [(1128.34, 1128.89)],
+                                     [(1127.90, 1127.98), (1127.98, 1129.68), (1129.68, 1130.18), (1130.18, 1131.46)])
+    assert s0 == 1127.77 and gaps == [(1128.34, 1128.89)]

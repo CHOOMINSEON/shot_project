@@ -507,7 +507,8 @@ def split_sentences(words, duration, gap=.7, longest=12.):
                     conf = sum(float(w.get('confidence', 0)) for w in part) / len(part)
                     pauses = [(float(a['end']), float(b['start'])) for a, b in zip(part, part[1:]) if b['start'] - a['end'] > .3]
                     result.append({'start': float(part[0]['start']), 'end': min(float(duration), float(part[-1]['end'])),
-                                   'text': text, 'confidence': round(conf, 3), 'pauses': pauses, **dict(zip(('quality', 'quality_notes'), take_quality(part))),
+                                   'text': text, 'confidence': round(conf, 3), 'pauses': pauses,
+                                   'word_times': [(float(w['start']), float(w['end'])) for w in part], **dict(zip(('quality', 'quality_notes'), take_quality(part))),
                                    **classify(text)})
             bucket.clear()
     for word in words:
@@ -725,6 +726,36 @@ def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
     return s, e, gaps
 
 
+SWALLOW = 1.5   # 단어 하나가 이보다 길면 인식기가 그 사이 말(같은 말 반복·재시작)을 받아 적지 않고 삼킨 것
+
+
+def skip_swallowed(s0, s1, gaps, word_times, tol=.3):
+    """인식기가 받아 적지 않은 '같은 말 반복'을 뺀다 → (새 시작, 새 쉼 목록).
+
+    실제 원본(1122 가나 프리미엄 134~144초): '필링까지'가 133.2~141.6초 한 단어로 찍혔고, 그 사이 목소리 구간 3개는
+    같은 말을 다시 시작한 부분이었다(사용자: '두 번씩 말하는 버그'). 완성본 1123은 마지막 시도(138초~)만 썼다.
+    그래서 긴 단어가 덮는 목소리 구간 중 다른 단어가 시작하지 않는 구간은 마지막 하나만 남긴다.
+    """
+    pieces, t = [], s0
+    for a, b in sorted(gaps):
+        pieces.append((t, a))
+        t = b
+    pieces.append((t, s1))
+    starts = [w0 for w0, _ in word_times]
+    def spoken(p):
+        return any(p[0] - tol <= x <= p[1] + tol for x in starts)
+    drop = set()
+    for w0, w1 in word_times:
+        if w1 - w0 <= SWALLOW:
+            continue
+        silent = [i for i, p in enumerate(pieces) if p[1] > w0 - tol and p[0] < w1 and not spoken(p)]
+        drop |= set(silent[:-1])
+    if not drop or len(drop) >= len(pieces):
+        return s0, gaps
+    kept = [p for i, p in enumerate(pieces) if i not in drop]
+    return kept[0][0], [(a[1], b[0]) for a, b in zip(kept, kept[1:])]
+
+
 def _units_for_asset(asset, frames, evidence, rules, notes):
     """한 원본의 편집 단위(문장 단위 + 음성 없는 보존 장면 단위)."""
     duration = asset['metadata']['duration']
@@ -739,6 +770,8 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
     for i, s in enumerate(sentences):
         nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
         s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt)
+        if gaps:
+            s0, gaps = skip_swallowed(s0, s1, gaps, s.get('word_times', []))
         s['voice'] = (s0, s1, gaps) if (s0, s1) != (s['start'], s['end']) or gaps else None
         prev_end = s1 if s['voice'] else s['end']
     units = []
