@@ -553,3 +553,53 @@ def test_every_type_has_its_own_default_guideline():
     assert not guided.is_default_text('내가 고친 지침')
     # 새 유형의 지침도 해설 유형 지침도 오래된 기본 지침으로 인식된다
     assert guided.default_for('product_mukbang').startswith('업로드한 먹방 리뷰 영상과 제품 디테일 컷')
+
+
+# ------------------------------------------------ 실제 목소리(VAD) 기준 경계 · 무음 · 겹침
+def test_snap_to_voice_pulls_late_first_word_and_trims_silent_tail():
+    # 실제 원본(1122)에서 본 모양: 인식기는 325.64~329.74로 찍었지만 실제 목소리는 324.66~325.56, 326.97~329.11.
+    voice = [(320.0, 321.0), (324.66, 325.56), (326.97, 329.11), (334.71, 336.25)]
+    s, e, gaps = guided.snap_to_voice(325.64, 329.74, voice, lo=321.2, hi=334.78)
+    assert s == 324.66                       # 첫 단어('단짠단짠한데')를 자르지 않는다
+    assert e == 329.11                       # 끝의 0.6초 무음은 빼고 말끝 여유는 나중에 더한다
+    assert gaps == [(325.56, 326.97)]        # 문장 안 1.4초 쉼
+    # 앞 문장 영역(lo)은 넘어가지 않는다
+    s, _, _ = guided.snap_to_voice(325.64, 329.74, voice, lo=325.0, hi=334.78)
+    assert s >= 325.0
+
+
+def test_snap_to_voice_keeps_whisper_when_vad_is_weak():
+    # 배경 소음이 커서 VAD가 1.16초 중 0.29초만 잡으면 0.25초까지만 줄인다.
+    s, e, _ = guided.snap_to_voice(15.91, 17.07, [(16.35, 16.64)])
+    assert abs(s - 16.16) < 1e-6 and abs(e - 16.82) < 1e-6
+    assert guided.snap_to_voice(5, 6, []) == (5, 6, [])
+
+
+def _voice_asset(words, voice, duration=60):
+    a = asset(words, duration)
+    a['analysis']['speech'] = [list(v) for v in voice]
+    return a
+
+
+def test_long_pause_inside_sentence_is_shortened_and_clips_never_overlap():
+    words = [w(1, ' 오늘은 편의점 신상 크림빵을 먹어볼게요.', 8, 11), w(2, ' 이거 식감이 쫄깃하고 촉촉해서 맛있어요.', 20.4, 25.6),
+             w(3, ' 다시 사 먹고 싶어요.', 30, 32)]
+    voice = [(8.1, 10.6), (20.0, 21.5), (23.5, 25.0), (30.0, 31.8)]   # 2번 문장 안 2초 쉼, 인식기 끝은 0.6초 늦음
+    a = _voice_asset(words, voice)
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    clips = guided.plan([a], rules, {'v': []}, {})['clips']
+    spans = sorted((c['start'], c['end']) for c in clips)
+    assert all(x[1] <= y[0] + 1e-9 for x, y in zip(spans, spans[1:]))     # 같은 소리가 두 번 나지 않음
+    covered = lambda t: any(c0 <= t <= c1 for c0, c1 in spans)
+    assert covered(20.0) and covered(21.5) and covered(23.5) and covered(25.0)   # 문장 앞뒤 목소리는 다 남김
+    assert not covered(22.5)                                                    # 2초 쉼 한가운데는 뺌
+    assert not any(c0 < 25.6 < c1 for c0, c1 in spans) or max(c1 for c0, c1 in spans if c0 < 25.6) <= 25.0 + guided.TAIL_MAX + .05
+
+
+def test_adjacent_clips_do_not_overlap_after_frame_rounding():
+    units = [{'kind': 'speech', 'asset_id': 'v', 'filename': 'x', 'start': 1.01, 'end': 2.015, 'role': 'taste', 'labels': ['taste'],
+              'text': 'a', 'review': [], 'visual_roles': [], 'overlay': {'start': 10., 'end': 10.5, 'role': 'eating'}}]
+    a = asset([], 30)
+    clips = guided._merge_clips(units, [a], {'frame': 'auto', 'tight': False}, 30)
+    assert len(clips) == 2
+    assert clips[0]['end'] <= clips[1]['start'] + 1e-9
