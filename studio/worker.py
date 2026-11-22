@@ -545,7 +545,12 @@ def guided_edit(ident, payload):
         if style == 'auto':
             style, confidence, reasons = guided.detect_style(list(assets.values()), frames_by_asset)
             detected = {'style': style, 'confidence': confidence, 'reasons': reasons}
-        rules = guided.parse_guideline(payload['guideline'], style)
+            # 자동 추정일 때 지침을 고치지 않았다면 추정한 유형의 기본 지침을 쓴다.
+            if guided.is_default_text(payload['guideline']):
+                payload['guideline'] = guided.default_for(style)
+                detected['guideline'] = True
+        # 영상 콘티의 '목표 N초'는 해석할 때만 앞에 붙인다(저장하는 지침 원문은 그대로).
+        rules = guided.parse_guideline(guided.storyboard_guideline(payload['guideline'], payload.get('storyboard', '')), style)
         if rules.get('scenes') and scenes.records:
             # 지시문의 '남길 장면'마다 화면 검색(CLIP·OCR)으로 후보를 찾아 둔다.
             rules['scene_hits'] = {}

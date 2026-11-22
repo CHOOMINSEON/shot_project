@@ -7,7 +7,7 @@ const GUIDED_REASON={prep:'촬영 준비·대기',retake:'말실수 재시도',r
 async function loadGuidedDefaults(){
  if(guidedDefaults||guidedLoading)return;guidedLoading=true;
  try{guidedDefaults=await api('/guided/defaults');
-  $('guided-style').innerHTML='<option value="auto">자동 추정 (업로드 구성으로 판단)</option>'+guidedDefaults.styles.map(s=>`<option value="${esc(s.key)}">${esc(s.name)}</option>`).join('');
+  $('guided-style').innerHTML='<option value="auto">자동 추정 (업로드 구성으로 판단)</option>'+guidedDefaults.styles.map((s,i)=>`<option value="${esc(s.key)}">${i+1}. ${esc(s.name)}</option>`).join('');
   guidedFormProject=null;drawGuided();}
  catch(error){/* 로그인 전에는 다시 시도 */}finally{guidedLoading=false;}
 }
@@ -17,10 +17,9 @@ function drawGuided(){
  if(!guidedDefaults){loadGuidedDefaults();return;}
  if(guidedFormProject!==project?.id){
   const saved=project?.state.guided_brief;
-  // 예전 기본 지침이 그대로 저장된 프로젝트는 새 기본 지침으로 보여준다(직접 고친 지침은 그대로)
-  const old=guidedDefaults.guidelines?.general;
-  $('guided-text').value=saved?.guideline&&saved.guideline.trim()!==old?.trim()?saved.guideline:guidedDefaults.guideline;
   $('guided-style').value=saved?.style&&[...$('guided-style').options].some(o=>o.value===saved.style)?saved.style:'auto';
+  // 기본 지침(예전 것 포함)이 그대로 저장돼 있으면 고른 유형의 새 기본 지침으로 보여준다. 직접 고친 지침은 그대로 둔다.
+  $('guided-text').value=saved?.guideline&&!isDefaultGuideline(saved.guideline)?saved.guideline:guidelineFor($('guided-style').value);
   guidedFormProject=project?.id;
  }
  const style=guidedDefaults.styles.find(s=>s.key===$('guided-style').value);
@@ -89,10 +88,13 @@ action('guided-start',async()=>{
   await poll();}
  finally{guidedStarting=false;drawGuided();}
 });
+function guidelineFor(style){const map=guidedDefaults?.guidelines||{};return map[style]||map.default||guidedDefaults?.guideline||'';}
+function isDefaultGuideline(text){const t=(text||'').trim();if(!t)return true;
+ return [...Object.values(guidedDefaults?.guidelines||{}),...(guidedDefaults?.old_guidelines||[])].some(g=>g.trim()===t);}
 bind('guided-style','change',()=>{
- // 사용자가 고치지 않은 기본 지침이면 유형에 맞는 기본 지침으로 바꿔 준다(직접 쓴 지침은 건드리지 않음).
- const map=guidedDefaults?.guidelines||{},texts=Object.values(map),cur=$('guided-text').value.trim();
- if(!cur||texts.some(t=>t.trim()===cur)){$('guided-text').value=$('guided-style').value==='commentary'?map.commentary:map.default;}
+ // 유형마다 기본 지침이 따로 있다. 고치지 않은 기본 지침이면 고른 유형의 지침으로 바꾸고, 직접 고친 지침은 물어본 뒤 바꾼다.
+ const next=guidelineFor($('guided-style').value);
+ if(isDefaultGuideline($('guided-text').value)||confirm('직접 고친 편집 지침이 있어요. 고른 유형의 기본 지침으로 바꿀까요?'))$('guided-text').value=next;
  drawGuided();});
 action('guided-play',()=>{
  const r=latestGuided?.result,video=r?.files?.find(f=>f.type==='video');

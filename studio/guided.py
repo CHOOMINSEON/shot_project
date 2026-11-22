@@ -14,46 +14,10 @@ import difflib
 import math
 import re
 
-# 기본 편집 지침(사용자가 화면에서 수정 가능). 이요링이 직접 정리한 원테이크 먹방 리뷰용 지침(2026-11-22).
-DEFAULT_GUIDELINE = """업로드한 원테이크 먹방 리뷰 영상에서 중요한 부분을 골라 세로 9:16 숏폼으로 편집해줘.
+from .guided_texts import TYPE_GUIDELINES
 
-목표 길이는 45~60초로 하되, 먹은 직후 반응이나 문장 끝을 자르면서 억지로 길이를 맞추지 마.
-
-이 영상은 한 번에 이어서 찍은 영상이야. 장면 순서는 촬영한 순서를 그대로 유지하고, 그 안에서 필요 없는 구간만 잘라내줘.
-
-남길 장면:
-- 첫 장면: 가장 강한 반응이나 핵심 질문이 나오는 순간. 없으면 음식이나 제품 전체가 보이는 순간
-- 제품명·포장이 잘 보이는 장면
-- 개봉, 자르기, 단면, 내용물을 보여주는 장면
-- 실제로 먹는 순간 (특히 첫 한입)
-- 먹은 직후 맛, 식감, 향을 구체적으로 말하는 발화
-- 가격, 장점, 아쉬운 점, 다른 제품과의 비교
-- 실제로 말한 최종 결론, 1위, 재구매 의사, 댓글 질문
-
-줄일 부분:
-- 촬영 준비, 카메라 조정, 의미 없는 대기
-- 말없이 씹기만 하는 긴 구간 (먹는 모습이 보이는 1~2초만 남기기)
-- 같은 음식을 여러 번 먹는 구간은 반응이 가장 분명한 한입만
-- 불필요하게 반복한 설명
-- 말실수 후 다시 말한 경우 앞의 실패한 부분
-
-단, 단면, 개봉, 첫 한입 장면은 음성이 없다는 이유만으로 삭제하지 마. 자르는 소리는 살려.
-
-구성:
-- 여러 제품이면 제품별로 묶고 서로 다른 제품의 설명과 화면을 섞지 마.
-- 마지막은 결론이나 댓글 질문으로 끝내기
-
-자막·표기:
-- 자막은 실제로 말한 내용 그대로, 한 화면에 짧게 끊어서 달기
-- 제품이 처음 나올 때 제품명 표시. 가격을 말하면 그 장면에 가격 표시
-- 광고·협찬을 언급하면 화면 상단에 '유료광고 포함'을 처음부터 끝까지 표시
-
-실제로 말하지 않은 평가나 결론은 만들지 마. 반응이 불분명하면 '확인 필요'로 표시하고, 먼저 추천 편집본을 만들어 내가 확인할 수 있게 해줘.
-
-이번 영상 정보:
-- 제품 이름·순서·가격:
-- 첫 장면 강조 자막:
-- 광고·협찬 여부:"""
+# 기본 편집 지침 = 원테이크 먹방 리뷰 지침. 유형별 지침은 guided_texts.TYPE_GUIDELINES.
+DEFAULT_GUIDELINE = TYPE_GUIDELINES['oneshot']
 
 # 이전 기본 지침(여러 종류 영상용). 이 지침이 저장된 프로젝트는 화면에서 새 기본 지침으로 바꿔 보여준다.
 DEFAULT_GUIDELINE_GENERAL = """업로드한 영상에서 중요한 부분을 골라 세로 9:16 숏폼으로 편집해줘.
@@ -105,7 +69,7 @@ DEFAULT_GUIDELINE_GENERAL = """업로드한 영상에서 중요한 부분을 골
 - 광고·협찬 여부:
 - 참고 대본:"""
 
-DEFAULT_GUIDELINE_COMMENTARY = """영화·TV·애니메이션 해석 영상을 심플하게 정리해줘.
+DEFAULT_GUIDELINE_COMMENTARY_OLD = """영화·TV·애니메이션 해석 영상을 심플하게 정리해줘.
 
 - 말 사이의 무음은 모두 빼줘.
 - 버벅이거나 말실수한 부분은 빼고, 같은 말을 여러 번 했으면 가장 잘 말한 한 번만 넣어줘.
@@ -114,7 +78,28 @@ DEFAULT_GUIDELINE_COMMENTARY = """영화·TV·애니메이션 해석 영상을 �
 
 실제로 말하지 않은 내용은 만들지 마."""
 
-GUIDELINES = {'default': DEFAULT_GUIDELINE, 'commentary': DEFAULT_GUIDELINE_COMMENTARY, 'general': DEFAULT_GUIDELINE_GENERAL}
+DEFAULT_GUIDELINE_COMMENTARY = TYPE_GUIDELINES['commentary']
+# 화면용: 유형 키 → 기본 지침. 'old'는 예전 기본 지침들(그대로 저장된 프로젝트는 새 지침으로 바꿔 보여준다).
+GUIDELINES = {'default': DEFAULT_GUIDELINE, **TYPE_GUIDELINES}
+OLD_GUIDELINES = [DEFAULT_GUIDELINE_GENERAL, DEFAULT_GUIDELINE_COMMENTARY_OLD]
+
+
+def storyboard_guideline(guideline, storyboard):
+    """영상 콘티에 '목표 N초'가 있으면 그 길이를 지침 맨 앞에 넣어 우선 적용한다(지침의 길이는 일반 템플릿이라서)."""
+    m = re.search(r'목표\s*(?:길이\s*)?(?:는\s*)?(\d{1,3})\s*초', storyboard or '')
+    if not m or not 5 <= int(m[1]) <= 600:
+        return guideline
+    seconds = int(m[1])
+    return f'영상 콘티의 목표 길이는 {max(5, int(seconds * .85))}~{seconds}초.\n\n' + guideline
+
+
+def default_for(style):
+    return TYPE_GUIDELINES.get(style, DEFAULT_GUIDELINE)
+
+
+def is_default_text(text):
+    t = (text or '').strip()
+    return not t or t in {g.strip() for g in list(TYPE_GUIDELINES.values()) + OLD_GUIDELINES}
 
 # ---------------------------------------------------------------- 영상 유형(5종 + 해석 리뷰)
 # 사용자가 설명한 5가지 제작 방식. 값은 시작점이며 지침·프로필이 덮어쓴다.
@@ -124,6 +109,12 @@ STYLES = {
         'max_silent_visual': 5.0, 'max_shot': None, 'frame': 'auto',
         'order': ['intro', 'opening', 'eating', 'taste', 'conclusion'],
         'note': '촬영 순서를 유지하고 준비·말실수·반복·긴 무음만 줄입니다.'},
+    # 먹방 원본(말하면서 먹기) + 따로 찍은 무음 디테일 컷(패키지·단면·늘어남). 원본 발화가 중심.
+    'product_mukbang': {
+        'name': '제품컷 + 먹방 리뷰', 'target': (45, 60), 'hook': 'visual', 'narration': False,
+        'max_silent_visual': 3.0, 'max_shot': 3.0, 'frame': 'auto',
+        'order': ['intro', 'packaging', 'crosssection', 'eating', 'taste', 'conclusion'],
+        'note': '먹방 원본의 실제 발화를 중심으로, 말하는 제품·특징에 맞는 디테일 컷(1~3초)을 덮습니다.'},
     'cook_mukbang': {
         'name': '조리 짧은 컷 + 먹방 (나레이션 후녹음)', 'target': (55, 75), 'hook': 'visual', 'narration': True,
         'max_silent_visual': 3.0, 'max_shot': 4.0, 'frame': 'auto',
@@ -139,17 +130,17 @@ STYLES = {
         'name': '브이로그·현장 체험 (짧은 컷 + 현장 멘트)', 'target': (60, 70), 'hook': 'visual', 'narration': True,
         'max_silent_visual': 2.0, 'max_shot': 2.0, 'frame': 'auto',
         'order': [], 'note': '60~70초 고정. 1~2초 컷을 이어 붙이고, 같은 동작은 한 컷만, 현장 멘트는 가장 센 한두 마디만 남깁니다.'},
+    'restaurant': {
+        'name': '맛집 리뷰 (짧은 컷 + 먹방 + 나레이션)', 'target': (22, 55), 'hook': 'visual', 'narration': True,
+        'max_silent_visual': 3.0, 'max_shot': 4.0, 'frame': 'auto',
+        'order': ['packaging', 'cooking', 'eating', 'taste', 'conclusion'],
+        'note': '가게·메뉴·음식·먹방 컷 위주. 나레이션은 따로 연결합니다.'},
     # 채널 '이요저장소'(영화·TV·애니 해석) 쇼츠 1개(60초)에서 파악: 얼굴로 말하는 영상 + 작품 장면 겹침, 4구간(12/18/14/16초),
     # 질문형 제목, 마지막에 시청자 질문. 작품 장면 자동 인식은 아직 없어 장면 연결은 직접 합니다.
     'commentary': {
         'name': '영화·TV·애니 해석 리뷰 (말하는 영상 + 작품 장면)', 'target': (45, 65), 'hook': 'speech', 'narration': False,
         'max_silent_visual': 3.0, 'max_shot': None, 'frame': 'auto',
         'order': [], 'note': '심플 편집: 무음 제거 · 버벅인 부분 제거 · 가장 잘 말한 테이크만 · 말끝 보존 · 순서와 길이 그대로. 작품 장면은 직접 연결합니다.'},
-    'restaurant': {
-        'name': '맛집 리뷰 (짧은 컷 + 먹방 + 나레이션)', 'target': (22, 55), 'hook': 'visual', 'narration': True,
-        'max_silent_visual': 3.0, 'max_shot': 4.0, 'frame': 'auto',
-        'order': ['packaging', 'cooking', 'eating', 'taste', 'conclusion'],
-        'note': '가게·메뉴·음식·먹방 컷 위주. 나레이션은 따로 연결합니다.'},
 }
 
 # 업로드한 완성본 6개(2026-10~11월, 21~70초)를 측정한 값. 평균 컷 0.9~1.3초(중앙값 0.8~1.1초), 분당 46~66컷,
@@ -400,7 +391,7 @@ def parse_guideline(text, style='oneshot'):
         rules.update(tight=True, no_trim=True, hook='none', protect_silent=False)
         rules['applied'] = [a for a in rules['applied'] if not a.startswith('목표 길이')]
         rules['applied'] += ['문장 사이·문장 안의 무음 제거', '여러 번 말한 문장은 가장 잘 말한 한 번만', '말한 순서 그대로 · 길이 맞추려고 빼지 않음']
-    food = style in ('oneshot', 'cook_mukbang', 'restaurant')
+    food = style in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant')
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
     if rules['overlay_eating']:
@@ -886,11 +877,11 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     # 필수 요소 점검: 없으면 '없음'으로 보고(만들어 넣지 않음)
     missing = []
     have = {l for u in kept for l in u['labels']}
-    if ({'conclusion', 'repurchase'} & rules['keep']) and not ({'conclusion', 'repurchase'} & have) and rules['style'] in ('oneshot', 'cook_mukbang', 'restaurant'):
+    if ({'conclusion', 'repurchase'} & rules['keep']) and not ({'conclusion', 'repurchase'} & have) and rules['style'] in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant'):
         missing.append('실제로 말한 결론·재구매 의사를 찾지 못했어요. 추가하지 않았습니다.')
     if 'packaging' in rules['keep'] and 'packaging' not in have and not any('packaging' in u['visual_roles'] for u in kept) and rules['style'] != 'vlog':
         missing.append('제품·포장이 보이는 장면 후보를 찾지 못했어요.')
-    if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'cook_mukbang', 'restaurant'):
+    if 'eating' in rules['keep'] and not any(('eating' in u['labels']) or ('eating' in u['visual_roles']) for u in kept) and rules['style'] in ('oneshot', 'product_mukbang', 'cook_mukbang', 'restaurant'):
         missing.append('먹는 장면 후보를 찾지 못했어요.')
 
     if rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):

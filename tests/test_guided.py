@@ -431,7 +431,7 @@ def test_commentary_is_simple_tight_cut_with_best_take_and_kept_endings():
              w(3, ' 오디세우스가 돌아온 이유는', 6.0, 7.5), w(4, ' 오디세', 7.6, 7.9),       # 버벅임 → 다시 말함
              w(5, ' 오디세우스가 돌아온 이유는 가족 때문이에요.', 10.0, 12.5),
              w(6, ' 여러분은 어떻게 보셨나요?', 16.0, 18.0)]
-    rules = guided.parse_guideline(guided.DEFAULT_GUIDELINE_COMMENTARY, 'commentary')
+    rules = guided.parse_guideline(guided.DEFAULT_GUIDELINE_COMMENTARY_OLD, 'commentary')
     assert rules['tight'] and rules['no_trim'] and rules['hook'] == 'none' and not rules['hook_montage']
     a = asset(words, 30)
     result = guided.plan([a], rules, {'v': []}, {})
@@ -535,8 +535,21 @@ def test_default_guideline_oneshot_mukbang():
 
 
 def test_storyboard_target_overrides_template_length():
-    from studio.app import storyboard_guideline
+    storyboard_guideline = guided.storyboard_guideline
     text = storyboard_guideline(guided.DEFAULT_GUIDELINE, '편집 구성표\n목표 65초. 시식 멘트까지 포함해 원 녹음이 82초라면')
     assert guided.parse_guideline(text, 'oneshot')['target'] == (55, 65)
     assert storyboard_guideline(guided.DEFAULT_GUIDELINE, '') == guided.DEFAULT_GUIDELINE
     assert storyboard_guideline(guided.DEFAULT_GUIDELINE, '그냥 메모') == guided.DEFAULT_GUIDELINE
+
+
+def test_every_type_has_its_own_default_guideline():
+    from studio.guided_texts import TYPE_GUIDELINES
+    assert set(TYPE_GUIDELINES) == set(guided.STYLES)
+    for key, text in TYPE_GUIDELINES.items():
+        rules = guided.parse_guideline(text, key)
+        assert key == 'commentary' or rules['target'] == (45, 60), key
+        assert guided.is_default_text(text)
+    assert guided.is_default_text(guided.DEFAULT_GUIDELINE_GENERAL)
+    assert not guided.is_default_text('내가 고친 지침')
+    # 새 유형의 지침도 해설 유형 지침도 오래된 기본 지침으로 인식된다
+    assert guided.default_for('product_mukbang').startswith('업로드한 먹방 리뷰 영상과 제품 디테일 컷')
