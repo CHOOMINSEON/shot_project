@@ -67,3 +67,16 @@ def test_offline_or_local_build_just_runs(tmp_path, monkeypatch):
         raise OSError('offline')
     monkeypatch.setattr(updater.urllib.request, 'urlopen', boom)
     assert updater.check_and_apply(tmp_path, log=lambda m: None) is None
+
+
+def test_newer_full_install_is_not_overridden_by_old_code_update(tmp_path, monkeypatch):
+    # 예전에 받아 둔 코드 업데이트(bbbbbbbb)가 남아 있는데, 사용자가 최신 전체 zip(cccccccc)을 새로 받아 실행한 경우
+    old = tmp_path / 'app-update' / 'current'
+    with zipfile.ZipFile(io.BytesIO(make_zip('bbbbbbbb1111', 'D1', 'old'))) as z:
+        z.extractall(old)
+    monkeypatch.setattr(updater, 'bundled_build', lambda: {'sha': 'cccccccc2222', 'deps': 'D1'})
+    fake_net(monkeypatch, 'desktop-windows-cccccccc', make_zip('cccccccc2222', 'D1', 'latest'))
+    logs = []
+    assert updater.check_and_apply(tmp_path, log=logs.append) is None   # 설치본 코드를 그대로 쓴다
+    assert not old.exists()
+    assert any('정리' in m for m in logs)
