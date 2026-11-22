@@ -47,8 +47,8 @@ function draw(){
   selected=Math.max(0,Math.min(selected,project.state.clips.length-1));
   if(!project.assets.some(a=>a.id===activeAsset))activeAsset=project.assets[0]?.id;
   $('project-name').value=project.name;$('workspace-name').textContent=project.name;
-  $('save-status').textContent=`✓ 저장됨 · 편집 버전 ${project.revision}`;$('asset-count').textContent=project.assets.length+'개';$('loaded-count').textContent=project.assets.length?`불러온 원본 ${project.assets.length}개 · 더 놓으면 추가돼요`:'파일당 10GB · 최대 2시간';
-  $('assets').innerHTML=project.assets.map(a=>`<div class="asset ${a.id===activeAsset?'active':''}" data-asset="${a.id}">${a.status==='ready'?`<img src="/api/assets/${a.id}/thumbnail" alt="">`:'<span>◷</span>'}<div><b title="${esc(a.name)}">${esc(a.name)}</b><small>${bytes(a.size)} · ${a.status==='ready'?clock(a.metadata.duration):({'uploading':'업로드 대기','checking':'영상 검사 중','invalid':'파일 검사 실패'}[a.status]||a.status)}</small></div>${['uploading','invalid'].includes(a.status)?`<button data-discard="${a.id}" class="danger">정리</button>`:`<span class="asset-actions"><button data-rename-asset="${a.id}" class="ghost" title="이름 수정">수정</button><button data-delete-asset="${a.id}" class="danger" title="이 영상 삭제">삭제</button></span>`}</div>`).join('')||'<div class="empty-small">원본을 올리면 여기에 모여요.</div>';
+  $('save-status').textContent=`✓ 저장됨 · 편집 버전 ${project.revision}`;$('asset-count').textContent=project.assets.length+'개';if($('media-count'))$('media-count').textContent=project.assets.length+'개';$('loaded-count').textContent=project.assets.length?`불러온 원본 ${project.assets.length}개 · 더 놓으면 추가돼요`:'파일당 10GB · 최대 2시간';
+  $('assets').innerHTML=project.assets.map(a=>`<div class="asset ${a.id===activeAsset?'active':''}" data-asset="${a.id}">${a.status==='ready'?`<img src="/api/assets/${a.id}/thumbnail" alt="">`:'<span>◷</span>'}<div><b title="${esc(a.name)}">${esc(a.name)}</b><small>${bytes(a.size)} · ${a.status==='ready'?clock(a.metadata.duration):({'uploading':'업로드 대기','checking':'영상 검사 중','invalid':'파일 검사 실패'}[a.status]||a.status)}</small></div>${['uploading','invalid'].includes(a.status)?`<button data-discard="${a.id}" class="danger">정리</button>`:`<span class="asset-actions"><button data-rename-asset="${a.id}" class="ghost" title="이름 수정" aria-label="이름 수정">✎</button><button data-delete-asset="${a.id}" class="danger" title="이 영상 삭제" aria-label="이 영상 삭제">✕</button></span>`}</div>`).join('')||'<div class="empty-small">＋ 영상 추가를 누르거나 영상·폴더를 여기로 끌어다 놓으세요.</div>';
   $('analysis-asset').innerHTML=project.assets.filter(a=>a.status==='ready').map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');$('analysis-asset').value=activeAsset||'';
   $('vocabulary').value=project.state.vocabulary||'';$('reference-script').value=project.state.reference_script||'';$('fps').value=project.state.fps||30;$('quality').value=project.state.quality||'standard';
   const length=editedLength();$('total-time').textContent=clock(length);$('export-duration').textContent=clock(length);$('timeline-end').textContent=clock(length);$('timeline-mid').textContent=clock(length/2);$('clip-count').textContent=`${project.state.clips.length}개 구간`;
@@ -244,6 +244,9 @@ async function uploadMedia(files,fromFolder){
   await uploadFiles(media);
 }
 bind('upload-folder','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadMedia(files,true);});
+bind('timeline-upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadMedia(files,false);});
+bind('timeline-upload-folder','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadMedia(files,true);});
+dropTarget($('assets'));
 function dropTarget(el){if(!el)return;
   const has=e=>[...(e.dataTransfer?.types||[])].includes('Files');
   el.addEventListener('dragover',e=>{if(!has(e))return;e.preventDefault();e.dataTransfer.dropEffect='copy';el.classList.add('drag');});
