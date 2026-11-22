@@ -13,7 +13,7 @@ function load(){try{thread=JSON.parse(localStorage.getItem(storeKey())||'[]');}c
 function save(){try{localStorage.setItem(storeKey(),JSON.stringify(thread.slice(-80)));}catch{}}
 function render(){
   const el=box();if(!el)return;
-  if(!thread.length){el.innerHTML=`<div class="chat-msg bot"><p>편집할 내용을 말로 지시해 주세요. 예: <b>3번 컷 지워</b>, <b>모든 컷 끝 0.2초 늘려</b>, <b>2번이랑 4번 바꿔</b>.</p><p class="muted">‘도움말’을 입력하면 쓸 수 있는 표현을 모두 보여드려요.</p></div>`;return;}
+  if(!thread.length){el.innerHTML='';return;}
   el.innerHTML=thread.map(m=>`<div class="chat-msg ${m.who}${m.error?' error':''}">${m.html||`<p>${esc(m.text)}</p>`}</div>`).join('');
   el.scrollTop=el.scrollHeight;
 }

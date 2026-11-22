@@ -238,3 +238,8 @@ label.check:has(#guided-fast) .muted{display:none}
 .tool-toggle button.active{background:#4a4c53;color:#fff}
 .tool-toggle kbd{font:inherit;font-size:9px;border:1px solid #777;border-radius:3px;padding:0 3px;margin-left:3px}
 @media(max-width:980px){.studio .timeline{height:auto}.studio .track-wrap{min-height:150px}}
+/* 설명 문구 빼기 */
+.story-panel .story-head,.story-panel>p,.header-tools .badge,.chip-free,
+.upload-zone>span:not(.upload-icon),#loaded-count,.library p.muted,.library .privacy,
+.guided-editor>.eyebrow,#guided-title,.guided-editor .script-inputs label>.muted,.guided-editor>p.muted,.guided-editor p.muted{display:none!important}
+.studio .story-panel{padding-top:10px}
