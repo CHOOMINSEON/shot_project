@@ -265,7 +265,7 @@ function modelInfo(){
 async function refreshDesktop(){
   if(!config?.desktop || $('login-dialog').open)return;
   const status=await api('/desktop/status');
-  $('desktop-setup').classList.remove('hidden');
+  $('desktop-setup').classList.toggle('hidden',status.status==='ready');
   $('desktop-setup').dataset.status=status.status;
   $('desktop-setup-message').textContent=status.message;
   $('desktop-setup-detail').textContent=status.status==='preparing'&&status.downloaded_bytes?`받은 파일 ${bytes(status.downloaded_bytes)} · 처음 한 번 준비하면 다음부터 재사용해요.`:'';

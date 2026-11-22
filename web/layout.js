@@ -42,6 +42,8 @@ main.classList.add('studio-grid');document.body.classList.add('studio');
 // 작업실 접힘 상태는 이 브라우저에 기억한다(채팅 공간을 넓히고 싶을 때 접기)
 try{if(localStorage.getItem('studio-library-open')==='0')library_box.open=false;}catch{}
 library_box.addEventListener('toggle',()=>{try{localStorage.setItem('studio-library-open',library_box.open?'1':'0');}catch{}});
-const fit=()=>{const h=q('header')?.offsetHeight||70;document.documentElement.style.setProperty('--hdr',h+'px');};
+// 화면 높이에서 머리글(과 위쪽 안내 줄)만큼 빼서 타임라인이 아래로 잘리지 않게 한다
+const fit=()=>{const h=Math.max(0,Math.round(main.getBoundingClientRect().top+scrollY));document.documentElement.style.setProperty('--hdr',(h||70)+'px');};
 fit();addEventListener('resize',fit);
+if(window.ResizeObserver){const ro=new ResizeObserver(fit);[q('header'),q('#desktop-setup')].forEach(e=>e&&ro.observe(e));}
 })();
