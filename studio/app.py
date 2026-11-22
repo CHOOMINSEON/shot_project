@@ -4,6 +4,7 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import time
@@ -727,6 +728,15 @@ def guided_defaults():
                                            'narration': v['narration']} for k, v in guided.STYLES.items()]}
 
 
+def storyboard_guideline(guideline, storyboard):
+    """영상 콘티에 '목표 N초'가 있으면 그 길이를 지침 맨 앞에 넣어 우선 적용한다(지침의 길이는 일반 템플릿이라서)."""
+    m = re.search(r'목표\s*(?:길이\s*)?(?:는\s*)?(\d{1,3})\s*초', storyboard or '')
+    if not m or not 5 <= int(m[1]) <= 600:
+        return guideline
+    seconds = int(m[1])
+    return f'영상 콘티의 목표 길이는 {max(5, int(seconds * .85))}~{seconds}초.\n\n' + guideline
+
+
 class GuidedEdit(BaseModel):
     revision: StrictInt
     guideline: str = Field(default='', max_length=6000)
@@ -735,6 +745,7 @@ class GuidedEdit(BaseModel):
     audio_source_ids: list[str] = Field(default_factory=list, max_length=50)  # 소리만 쓸 영상(먹방 소리 입히기)
     fast: bool = True  # 키프레임만 보고 글자 인식(OCR)을 생략하는 빠른 화면 분석
     speed: float = Field(default=1, ge=1, le=2)  # 배속은 사용자가 캡컷에서 직접 건다(기본 1 = 원래 속도)
+    storyboard: str = Field(default='', max_length=20000)  # 영상 콘티(후킹·대본·구성표). 목표 길이를 지침보다 우선 적용
 
 
 @app.post('/api/projects/{ident}/guided-edit')
@@ -750,7 +761,7 @@ def guided_edit(ident: str, body: GuidedEdit, request: Request):
     spoken = [a for a in assets if a['metadata'].get('has_audio')]
     available = [a for a in spoken if speech_ready or a['analysis'].get('transcribed')]
     validate_products(ident, current['state'].get('scene_products', []))
-    guideline = body.guideline.strip() or guided.DEFAULT_GUIDELINE
+    guideline = storyboard_guideline(body.guideline.strip() or guided.DEFAULT_GUIDELINE, body.storyboard)
     by_id = {a['id']: a for a in assets}
     audio_sources = list(dict.fromkeys(body.audio_source_ids))
     for sid in audio_sources:

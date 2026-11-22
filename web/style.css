@@ -196,3 +196,16 @@ main.studio-grid{grid-template-columns:250px minmax(0,1fr) 380px;gap:10px;paddin
 .studio-center{overflow:hidden}
 .studio .timeline{flex:0 1 auto;min-height:0}
 .studio .viewer{min-height:260px}
+/* 4차: X 표시 부분 숨김, 영상 콘티 탭 */
+#guided-style-note,#guided-audio-src,.guided-editor>p.muted,details.optional-silence,section.output-panel{display:none!important}
+label.check:has(#guided-fast) .muted{display:none}
+#guided-status:empty{display:none}
+.rail-tabs{grid-template-columns:repeat(3,1fr)}
+.rail-tabs button{font-size:12.5px;padding:8px 4px}
+.rail-story{flex:1 1 auto}
+.story-panel{display:flex;flex-direction:column;gap:8px;padding:14px;flex:1 1 auto;min-height:0}
+.story-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.story-head h2{margin:0;font-size:15px}
+.story-panel p{margin:0;font-size:11.5px}
+#storyboard-text{flex:1 1 auto;min-height:520px;width:100%;resize:vertical;font:inherit;font-size:13px;line-height:1.6;padding:12px;border:1px solid var(--line);border-radius:9px}
+.studio-right[data-rail=story]{overflow:auto}

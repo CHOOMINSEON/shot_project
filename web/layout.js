@@ -13,14 +13,15 @@ if(library){library_box.appendChild(library);left.appendChild(library_box);}
 [toolbar,viewer,timeline].forEach(e=>e&&center.appendChild(e));
 // 오른쪽은 '1. 편집 지침 / 2. 편집 채팅' 두 탭으로 나눈다
 const tabs=document.createElement('div');tabs.className='rail-tabs';tabs.setAttribute('role','tablist');
-tabs.innerHTML='<button type="button" role="tab" data-rail="guide">1. 편집 지침</button><button type="button" role="tab" data-rail="chat">2. 편집 채팅</button>';
-const guidePane=col('rail-pane rail-guide'),chatPane=col('rail-pane rail-chat');
-right.append(tabs,guidePane,chatPane);if(chat)chatPane.appendChild(chat);
+tabs.innerHTML='<button type="button" role="tab" data-rail="story">1. 영상 콘티</button><button type="button" role="tab" data-rail="guide">2. 편집 지침</button><button type="button" role="tab" data-rail="chat">3. 편집 채팅</button>';
+const storyPane=col('rail-pane rail-story'),guidePane=col('rail-pane rail-guide'),chatPane=col('rail-pane rail-chat');
+storyPane.innerHTML='<section class="panel story-panel"><div class="story-head"><h2>영상 콘티</h2><span id="storyboard-status" class="muted"></span></div><p class="muted">후킹, 녹음 대본, 편집 구성표를 붙여 넣으세요. 프로젝트마다 저장되고, 구성표의 목표 길이(예: 목표 65초)는 자동 편집에 반영돼요.</p><textarea id="storyboard-text" maxlength="20000" placeholder="예) 프리미엄 가나 초콜릿 4종 비교 숏폼&#10;시식 순서: CU 소금우유 → GS25 호지차 → …&#10;목표 65초"></textarea></section>';
+right.append(tabs,storyPane,guidePane,chatPane);if(chat)chatPane.appendChild(chat);
 const showRail=name=>{right.dataset.rail=name;tabs.querySelectorAll('button').forEach(b=>{const on=b.dataset.rail===name;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});
-  guidePane.hidden=name!=='guide';chatPane.hidden=name!=='chat';try{localStorage.setItem('studio-rail',name);}catch{}
+  storyPane.hidden=name!=='story';guidePane.hidden=name!=='guide';chatPane.hidden=name!=='chat';try{localStorage.setItem('studio-rail',name);}catch{}
   if(name==='chat')setTimeout(()=>q('#chat-input')?.focus(),0);};
 tabs.addEventListener('click',e=>{const b=e.target.closest('[data-rail]');if(b)showRail(b.dataset.rail);});
-let firstRail='guide';try{firstRail=localStorage.getItem('studio-rail')==='chat'?'chat':'guide';}catch{}
+let firstRail='story';try{const saved=localStorage.getItem('studio-rail');if(['story','guide','chat'].includes(saved))firstRail=saved;}catch{}
 showRail(firstRail);window.showRail=showRail;
 // 작업 공간에 남은 나머지(지침 자동 편집, 대본 편집, 무음 편집, 작업 진행, 기획판, 세부 편집)는 원래 순서대로 오른쪽으로
 const workspace=q('section.workspace'),grid=q('.editor-grid');

@@ -15,7 +15,7 @@ DEFAULT = None
 
 
 def default_guideline():
-    return guided.DEFAULT_GUIDELINE
+    return guided.DEFAULT_GUIDELINE_GENERAL
 
 
 def w(ident, text, a, b, conf=.95):
@@ -525,3 +525,18 @@ def test_scene_list_orders_edit_and_respects_live_absent_and_marks():
     assert by['본품까지 준다고?']['start'] == 0
     assert 'KK뷰티페스타' in by and by['KK뷰티페스타']['start'] > 0
     assert any('KGMA' in w and '표기' in w for w in result['warnings'])                  # 위치 못 찾은 표기는 알림
+
+
+def test_default_guideline_oneshot_mukbang():
+    rules = guided.parse_guideline(guided.DEFAULT_GUIDELINE, 'oneshot')
+    assert rules['target'] == (45, 60)
+    assert rules['group_products']
+    assert {'opening', 'crosssection', 'eating'} <= rules['keep']
+
+
+def test_storyboard_target_overrides_template_length():
+    from studio.app import storyboard_guideline
+    text = storyboard_guideline(guided.DEFAULT_GUIDELINE, '편집 구성표\n목표 65초. 시식 멘트까지 포함해 원 녹음이 82초라면')
+    assert guided.parse_guideline(text, 'oneshot')['target'] == (55, 65)
+    assert storyboard_guideline(guided.DEFAULT_GUIDELINE, '') == guided.DEFAULT_GUIDELINE
+    assert storyboard_guideline(guided.DEFAULT_GUIDELINE, '그냥 메모') == guided.DEFAULT_GUIDELINE

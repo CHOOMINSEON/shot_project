@@ -17,7 +17,9 @@ function drawGuided(){
  if(!guidedDefaults){loadGuidedDefaults();return;}
  if(guidedFormProject!==project?.id){
   const saved=project?.state.guided_brief;
-  $('guided-text').value=saved?.guideline||guidedDefaults.guideline;
+  // 예전 기본 지침이 그대로 저장된 프로젝트는 새 기본 지침으로 보여준다(직접 고친 지침은 그대로)
+  const old=guidedDefaults.guidelines?.general;
+  $('guided-text').value=saved?.guideline&&saved.guideline.trim()!==old?.trim()?saved.guideline:guidedDefaults.guideline;
   $('guided-style').value=saved?.style&&[...$('guided-style').options].some(o=>o.value===saved.style)?saved.style:'auto';
   guidedFormProject=project?.id;
  }
@@ -46,11 +48,11 @@ function drawGuided(){
  else if(latestGuided&&['failed','cancelled'].includes(latestGuided.status))$('guided-status').textContent=latestGuided.message;
  else if(applied)$('guided-status').textContent=`${r.style_name} · 편집본 ${clock(r.seconds,true)} (목표 ${r.target[0]}~${r.target[1]}초)`+(r.notice?'\n'+r.notice:'');
  else if(r?.notice)$('guided-status').textContent=r.notice;
- else $('guided-status').textContent=ready?'편집 지침을 확인하고 자동 편집을 시작하세요. 음성 모델 준비 중이면 장면 분석만 먼저 사용합니다.':'왼쪽에서 촬영 원본을 올려주세요. 프로젝트는 자동으로 만들어져요.';
+ else $('guided-status').textContent='';
  $('guided-downloads').innerHTML=exportable?(latestExport.result.files||[]).filter(f=>['video','archive','subtitle'].includes(f.type)).map(f=>`<a class="button ${f.type==='video'?'primary':'secondary'}" href="/api/exports/${latestExport.id}/${encodeURIComponent(f.name)}">${f.type==='subtitle'&&f.name.includes('표기')?'표기(유료광고·강조 자막) SRT':{video:'MP4',archive:'ZIP(MP4·SRT·컷 목록)',subtitle:'SRT'}[f.type]} 다운로드 · ${bytes(f.size)}</a>`).join(''):'';
  if(!exportable&&project?.state.guided?.overlays?.length)$('guided-downloads').innerHTML=`<a class="button secondary" href="/api/projects/${project.id}/overlays.srt">표기(유료광고·강조 자막) SRT 다운로드</a>`;
  const key=[latestGuided?.id,latestGuided?.updated,project?.revision].join(':');
- if(key!==guidedRenderKey){guidedRenderKey=key;$('guided-report').innerHTML=r?guidedReport(r):'';}
+ if(key!==guidedRenderKey){guidedRenderKey=key;$('guided-report').innerHTML=r?.units?guidedReport(r):'';}
 }
 
 function guidedReport(r){
@@ -83,7 +85,7 @@ action('guided-start',async()=>{
  const guideline=$('guided-text').value.trim(),style=$('guided-style').value,frame=$('guided-frame').value;
  guidedStarting=true;drawGuided();
  try{await mutate(s=>{s.guided_brief={guideline,style};});
-  await api('/projects/'+project.id+'/guided-edit',{method:'POST',body:JSON.stringify({revision:project.revision,guideline,style,frame,audio_source_ids:[...guidedAudioSrc],fast:$('guided-fast').checked})});
+  await api('/projects/'+project.id+'/guided-edit',{method:'POST',body:JSON.stringify({revision:project.revision,guideline,style,frame,audio_source_ids:[...guidedAudioSrc],fast:$('guided-fast').checked,storyboard:$('storyboard-text')?.value||''})});
   await poll();}
  finally{guidedStarting=false;drawGuided();}
 });
@@ -139,3 +141,23 @@ document.addEventListener('change',event=>{
  if(box.checked)guidedAudioSrc.add(box.dataset.gAudio);else guidedAudioSrc.delete(box.dataset.gAudio);
  guidedAudioKey='';drawGuided();
 });
+
+// 영상 콘티: 프로젝트마다 저장(입력이 멈추면 자동 저장)
+let storyProject=undefined,storyTimer=null;
+function drawStoryboard(){
+ const box=$('storyboard-text');if(!box)return;
+ if(storyProject!==project?.id){
+  const draft=box.value;storyProject=project?.id;
+  box.value=project?.state.storyboard||'';
+  // 프로젝트가 없을 때 써 둔 콘티는 새 프로젝트에 이어서 저장
+  if(project&&!box.value&&draft){box.value=draft;saveStoryboard();}
+ }
+}
+function saveStoryboard(){
+ clearTimeout(storyTimer);
+ if(!project){$('storyboard-status').textContent='원본을 올리면 이 프로젝트에 저장돼요';return;}
+ $('storyboard-status').textContent='저장 대기…';
+ storyTimer=setTimeout(async()=>{const text=$('storyboard-text').value;if((project.state.storyboard||'')===text){$('storyboard-status').textContent='저장됨';return;}
+  try{await mutate(s=>{s.storyboard=text;},false);await saveQueue;$('storyboard-status').textContent='저장됨';}catch(error){$('storyboard-status').textContent='저장 실패';toast(error.message);}},800);
+}
+document.addEventListener('input',e=>{if(e.target.id==='storyboard-text')saveStoryboard();});

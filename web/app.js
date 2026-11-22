@@ -54,7 +54,7 @@ function draw(){
   const length=editedLength();$('total-time').textContent=clock(length);$('export-duration').textContent=clock(length);$('timeline-end').textContent=clock(length);$('timeline-mid').textContent=clock(length/2);$('clip-count').textContent=`${project.state.clips.length}개 구간`;
   $('timeline-track').innerHTML=project.state.clips.map((c,i)=>`<button class="timeline-clip ${i===selected?'active':''} ${typeof editMulti!=='undefined'&&editMulti.has(i)?'multi':''}" draggable="true" data-clip="${i}" style="flex:${Math.max(.3,c.end-c.start)} 1 0" title="${esc(c.label)} · ${clock(c.start)}–${clock(c.end)}"><i class="trim trim-l" data-trim="l"></i><b class="clip-no">${i+1}</b><span class="clip-name">${esc(c.label||'유지 구간')}</span> <small>${(c.end-c.start).toFixed(1)}초</small><i class="trim trim-r" data-trim="r"></i></button>`).join('')||'<span class="muted">유지 구간을 추가하면 편집 타임라인이 생겨요.</span>';
   $('undo').disabled=!history.length;$('redo').disabled=!future.length;drawClip();drawAnalysis();drawCaptions();drawPlanning();waveform();
-  drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();
+  drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();if(typeof drawStoryboard==='function')drawStoryboard();
   $('srt-download').href=project?`/api/projects/${project.id}/captions.srt`:'#';
   if(!currentSource && clip())selectClip(selected,false);
 }
