@@ -254,7 +254,7 @@ function dropTarget(el){if(!el)return;
   el.addEventListener('drop',async e=>{if(!has(e))return;e.preventDefault();el.classList.remove('drag');
     try{const folder=[...(e.dataTransfer.items||[])].some(i=>i.webkitGetAsEntry?.()?.isDirectory);await uploadMedia(await droppedFiles(e.dataTransfer),folder);}catch(error){toast(error.message);}});
 }
-dropTarget($('dropzone'));dropTarget(document.querySelector('section.viewer'));
+dropTarget($('dropzone'));dropTarget(document.querySelector('section.viewer'));dropTarget(document.querySelector('section.timeline'));
 // 다른 곳에 잘못 놓아도 브라우저가 영상 파일을 열어 버리지 않게 막는다.
 for(const ev of ['dragover','drop'])window.addEventListener(ev,e=>{if([...(e.dataTransfer?.types||[])].includes('Files'))e.preventDefault();});
 bind('login-form','submit',async e=>{e.preventDefault();try{await api('/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('login-dialog').close();await init();}catch(error){$('login-error').textContent=error.message;}});$('login-dialog').addEventListener('cancel',e=>e.preventDefault());action('logout',async()=>{await api('/logout',{method:'POST'});$('player').pause();location.reload();});

@@ -36,6 +36,13 @@ const transport=viewer?.querySelector('.transport');
 if(transport){const acts=document.createElement('div');acts.className='transport-actions';
   ['guided-start','guided-play','guided-download'].forEach(id=>{const b=guidePane.querySelector('#'+id)||q('#'+id);if(b)acts.appendChild(b);});
   if(acts.children.length)transport.appendChild(acts);}
+// 타임라인 제목은 편집 도구 아래(트랙 바로 위)로
+const tlHead=timeline?.querySelector('.timeline-heading'),tlTools=timeline?.querySelector('.edit-tools');
+if(tlHead&&tlTools)tlTools.after(tlHead);
+// 왼쪽 아래: 단축키 모음
+const keys=document.createElement('div');keys.className='shortcut-card';
+keys.innerHTML='<b>단축키</b><dl>'+[['Space','재생'],['B','자르기 도구'],['A','선택 도구'],['E','여기서 자르기'],['Q','왼쪽 삭제'],['W','오른쪽 삭제'],['Del','삭제'],['Ctrl+D','복제'],['Ctrl+Z','취소'],['Ctrl+Y','다시'],['Ctrl+C','복사'],['Ctrl+V','붙여넣기'],['Ctrl+X','잘라내기'],['[ ]','구간 이동'],['← →','1프레임'],['Shift+← →','1초']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')+'</dl>';
+left.appendChild(keys);
 const old=[...main.children];
 main.append(left,center,right);
 old.forEach(e=>{if(e!==left&&e!==center&&e!==right&&!e.children.length)e.remove();else if(e.classList?.contains('workspace'))e.hidden=true;});
