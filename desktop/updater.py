@@ -71,7 +71,15 @@ def check_and_apply(data_dir, log=print, timeout=6):
         tag_sha = release.get('tag_name', '').rsplit('-', 1)[-1]
         have = _read_build(current) if current.is_dir() else None
         have_sha = (have or base)['sha']
-        if asset and tag_sha and not have_sha.startswith(tag_sha) and not base['sha'].startswith(tag_sha):
+        if tag_sha and base['sha'].startswith(tag_sha) and current.is_dir():
+            # 설치본(전체 zip) 자체가 최신이면, 예전에 받아 둔 코드 업데이트가 최신 설치본을 덮지 않게 치운다.
+            shutil.rmtree(store / 'previous', ignore_errors=True)
+            try:
+                current.rename(store / 'previous')
+            except OSError:
+                shutil.rmtree(current, ignore_errors=True)
+            log('설치한 앱이 최신 버전이라 예전에 받아 둔 업데이트를 정리했어요.')
+        elif asset and tag_sha and not have_sha.startswith(tag_sha) and not base['sha'].startswith(tag_sha):
             log('새 버전 코드를 받는 중이에요(약 1MB)…')
             with urllib.request.urlopen(urllib.request.Request(asset['browser_download_url'], headers={'User-Agent': 'IyoringCutStudio'}), timeout=60) as r:
                 blob = r.read()
@@ -92,7 +100,10 @@ def check_and_apply(data_dir, log=print, timeout=6):
             else:
                 shutil.rmtree(store / 'previous', ignore_errors=True)
                 if current.is_dir():
-                    current.rename(store / 'previous')
+                    try:
+                        current.rename(store / 'previous')
+                    except OSError:
+                        shutil.rmtree(current, ignore_errors=True)
                 staging.rename(current)
                 log(f'새 버전 코드({got["sha"][:8]})를 적용했어요.')
     except Exception as exc:   # 인터넷이 없거나 GitHub 응답이 없어도 그냥 지금 버전으로 실행
