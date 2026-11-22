@@ -14,7 +14,7 @@ const captionFindings=new Map();
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').style.display='none',6000);}
 async function api(path, options={}){
   const response=await fetch('/api'+path,{...options,headers:{...(options.body && typeof options.body==='string'?{'Content-Type':'application/json'}:{}),...options.headers}});
-  if(response.status===401 && path!='/login'){$('login-dialog').showModal();throw Error('소유자 로그인이 필요합니다.');}
+  if(response.status===401 && path!='/login'){if(!options.retried){const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"password":""}'}).catch(()=>null);if(r?.ok)return api(path,{...options,retried:true});}$('login-dialog').showModal();throw Error('소유자 로그인이 필요합니다.');}
   const data=await response.json().catch(()=>({}));
   if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:(data.detail?.[0]?.msg||'요청을 처리하지 못했습니다. 입력과 연결 상태를 확인해 주세요.'));
   return data;
@@ -273,7 +273,7 @@ async function refreshDesktop(){
   config.model_ready=status.status==='ready';modelInfo();
 }
 action('desktop-setup-retry',async()=>{await api('/desktop/retry',{method:'POST'});await refreshDesktop();});
-async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();$('local-link').classList.toggle('hidden',!config.desktop);clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
+async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();$('local-link').classList.toggle('hidden',!config.desktop);$('logout').hidden=Boolean(config.desktop);clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
 window.addEventListener('resize',waveform);window.addEventListener('DOMContentLoaded',init);
 
 const exampleScript=`아니 제가 CU 다섯 곳이나 돌아서 겨우 3개 구했거든요?
