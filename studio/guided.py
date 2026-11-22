@@ -678,6 +678,40 @@ def speech_tail(envelope, end):
     return TAIL_MAX if start < len(db) else TAIL_DEFAULT
 
 
+VOICE_LEAD = .15        # 실제 목소리(VAD) 시작 앞 여유: 첫 자음이 잘리지 않게
+VOICE_REACH = 1.2       # 인식기 단어 시간이 실제 목소리보다 늦을 때 앞으로 당겨 올 수 있는 최대 거리
+PAUSE_KEEP = (.18, .12)  # 문장 안 긴 쉼을 줄일 때 남기는 앞·뒤 여유(합 0.3초 = 자연스러운 숨)
+PAUSE_LONG = .5          # 이보다 긴 문장 안 쉼만 줄인다
+
+
+def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
+    """인식기(Whisper) 문장 시간 → 실제 목소리(VAD) 기준 시간.
+
+    실제 원테이크 먹방 원본(1122 가나 프리미엄)에서 Whisper 단어 시간이 실제 목소리보다 0.4~1초 늦거나
+    말끝이 0.4초 이상 무음 쪽으로 늘어나 있었다. 그대로 자르면 문장 첫 단어가 잘리고 끝에 무음이 남는다.
+    voice: [[시작, 끝], ...] 원본 전체 VAD 말소리 구간. lo/hi: 앞 문장 끝·뒤 문장 시작(넘지 않음).
+    반환: (목소리 시작, 목소리 끝, 문장 안 무음 [(a, b), ...]).
+    """
+    if not voice:
+        return start, end, []
+    inside = [(a, b) for a, b in voice if b > start and a < end]
+    if not inside:
+        return start, end, []
+    before = [(a, b) for a, b in voice if b <= inside[0][0]]
+    if before and before[-1][1] > start - .35 and before[-1][0] >= lo and before[-1][0] >= start - VOICE_REACH:
+        inside.insert(0, before[-1])   # 인식기가 첫 단어를 늦게 찍었다: 바로 앞 목소리가 이 문장의 시작
+    s = max(inside[0][0], start - VOICE_REACH, lo)
+    e = min(inside[-1][1], hi, end + .6)
+    covered = sum(max(0., min(b, end) - max(a, start)) for a, b in inside)
+    if covered < .4 * (end - start):
+        # 배경 소음이 커서 VAD가 목소리를 일부만 잡은 경우: 인식기 시간에서 0.25초까지만 줄인다(말 잘림 방지).
+        s, e = min(s, start + .25), max(e, min(end - .25, hi))
+    if e - s < .15:
+        return start, end, []
+    gaps = [(b, a) for (_, b), (a, _) in zip(inside, inside[1:]) if s < b < a < e]
+    return s, e, gaps
+
+
 def _units_for_asset(asset, frames, evidence, rules, notes):
     """한 원본의 편집 단위(문장 단위 + 음성 없는 보존 장면 단위)."""
     duration = asset['metadata']['duration']
@@ -687,14 +721,26 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
     fast = rules['fast']
     pre = .08 if fast else .12
     envelope = asset.get('_envelope')
+    voice = [(float(a), float(b)) for a, b in (asset['analysis'].get('speech') or []) if b > a]
+    prev_end = 0.
+    for i, s in enumerate(sentences):
+        nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
+        s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt)
+        s['voice'] = (s0, s1, gaps) if (s0, s1) != (s['start'], s['end']) or gaps else None
+        prev_end = s1 if s['voice'] else s['end']
     units = []
     for s in sentences:
+        if s.get('voice'):
+            # 실제 목소리 시간으로 교체. 문장 안 긴 쉼(무음)도 목소리 기준으로 다시 잡는다.
+            s0, s1, gaps = s['voice']
+            s = {**s, 'start': s0, 'end': s1, 'pauses': gaps, 'voice_pre': VOICE_LEAD}
         roles = [(sh['role'], _overlap(s['start'], s['end'], sh['start'], sh['end'])) for sh in shots]
         roles = [r for r, o in sorted(roles, key=lambda x: -x[1]) if o > 0]
         rows = [r for r in frames if r['start'] < s['end'] and r['end'] > s['start']]
         labels = [l for l in s['labels'] if l in LABEL_KO] or ['chat']
+        lead = s.get('voice_pre', pre)
         unit = {'kind': 'speech', 'asset_id': asset['id'], 'filename': asset['name'],
-                'start': max(0., s['start'] - pre), 'end': min(duration, s['end'] + speech_tail(envelope, s['end'])), 'speech_start': s['start'],
+                'start': max(0., s['start'] - lead), 'end': min(duration, s['end'] + speech_tail(envelope, s['end'])), 'speech_start': s['start'],
                 'speech_end': s['end'], 'text': s['text'], 'labels': labels, 'role': labels[0],
                 'visual_roles': roles[:2], 'confidence': s['confidence'], 'drop': s['drop'],
                 'review': list(s['review']), 'negated': s['negated'], 'numbers': s['numbers'],
@@ -707,6 +753,10 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
                 if c1 - c0 >= .12:
                     cuts.append((c0, c1))
             unit['pauses'] = cuts
+        elif s.get('voice'):
+            # 먹방 등: 문장 안에서 0.5초 넘게 멈춘 곳(씹는 중·생각 중)은 0.3초 숨만 남기고 줄인다.
+            unit['pauses'] = [(a + PAUSE_KEEP[0], b - PAUSE_KEEP[1]) for a, b in s['pauses']
+                              if b - a > PAUSE_LONG and b - PAUSE_KEEP[1] - (a + PAUSE_KEEP[0]) >= .15]
         if s['confidence'] < .5:
             unit['review'].append('인식 신뢰도 낮음 · 원음 확인 필요')
         prod = product_for(rows, evidence, asset['id'])
@@ -802,18 +852,39 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                                     'reason_code': 'prep', 'reason': '첫 발화·보존 장면 이전(촬영 준비/대기)', 'text': ''})
 
     # 겹치는 단위 정리: 패딩끼리만 겹치므로 두 발화 사이의 중간점에서 나눈다(발화 자체는 보존).
+    # 말 없는 장면이 문장 앞뒤 여유(말끝)와 겹치면 장면 쪽을 줄인다(말끝 보존, 같은 소리 두 번 재생 방지).
     kept.sort(key=lambda u: (u['asset_id'], u['start']))
     for a, b in zip(kept, kept[1:]):
         if a['asset_id'] == b['asset_id'] and b['start'] < a['end']:
-            floor = a.get('speech_end', a['start'])
-            ceil = b.get('speech_start', b['end'])
-            mid = min(max((a['end'] + b['start']) / 2, floor), ceil)
-            a['end'], b['start'] = mid, mid
-    kept = [u for u in kept if u['end'] - u['start'] >= 1 / fps]
+            if a['kind'] == 'speech' and b['kind'] == 'visual':
+                b['start'] = min(a['end'], b['end'])
+            elif a['kind'] == 'visual' and b['kind'] == 'speech':
+                a['end'] = max(b['start'], a['start'])
+            else:
+                floor = a.get('speech_end', a['start'])
+                ceil = b.get('speech_start', b['end'])
+                mid = min(max((a['end'] + b['start']) / 2, floor), ceil)
+                a['end'], b['start'] = mid, mid
+    kept = [u for u in kept if u['end'] - u['start'] >= (.3 if u['kind'] == 'visual' else 1 / fps)]
+    # 한 단위가 다른 단위 안에 통째로 들어간 경우(인식 시간이 겹친 문장 등)도 정리: 앞 단위가 끝난 뒤부터만 쓴다.
+    tidy, last = [], {}
+    for u in kept:
+        end = last.get(u['asset_id'], -1.)
+        if u['start'] < end:
+            if u['end'] <= end + 1 / fps:
+                continue
+            u['start'] = end
+        last[u['asset_id']] = max(end, u['end'])
+        tidy.append(u)
+    kept = tidy
 
     # 목표 길이: 낮은 우선순위부터 제외. 필수(결론)·문장 중간은 절대 자르지 않음.
+    def length(u):
+        cut = sum(c1 - c0 for c0, c1 in u.get('pauses', []) if u['start'] < c0 < c1 < u['end'])
+        return u['end'] - u['start'] - cut
+
     def total(items):
-        return sum(u['end'] - u['start'] for u in items)
+        return sum(length(u) for u in items)
 
     def score(u):
         if u['kind'] == 'speech':
@@ -841,7 +912,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
     if total(kept) > target_max and not rules.get('no_trim') and not scene_mode:
-        order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -(u['end'] - u['start'])))
+        order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP)), key=lambda u: (score(u), -length(u)))
         for u in order:
             if total(kept) <= target_max:
                 break
@@ -890,8 +961,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         if pieces:
             kept[0]['montage'] = pieces
             notes.append(f'후킹 멘트 아래에 제품 장면 {len(pieces)}컷을 빠르게 얹었어요(완성본 1116 방식). 화면이 맞는지 확인하세요.')
-    if rules.get('tight'):
-        kept = _cut_pauses(kept)
+    kept = _cut_pauses(kept)   # 문장 안 긴 쉼 줄이기(해석 영상은 모든 쉼, 그 외는 0.5초 넘는 쉼)
     clips = _merge_clips(kept, assets, rules, fps)
     overlays = []
     for o in rules.get('overlays', []):
@@ -1073,19 +1143,27 @@ def _group_by_product(units):
 
 
 def _cut_pauses(kept):
+    """문장 안 쉼을 잘라 조각으로 나눈다. 화면을 얹은(시식 컷) 문장은 화면도 조각 길이만큼 이어서 나눈다."""
     out = []
     for u in kept:
         pieces, t = [], u['start']
-        for c0, c1 in u.get('pauses', []):
-            if u['start'] < c0 < c1 < u['end']:
-                pieces.append((t, c0))
-                t = c1
+        if not u.get('montage'):   # 후킹 몽타주는 소리 기준으로 화면이 짜여 있어 그대로 둔다
+            for c0, c1 in u.get('pauses', []):
+                if t < c0 < c1 < u['end']:
+                    pieces.append((t, c0))
+                    t = c1
         pieces.append((t, u['end']))
         if len(pieces) == 1:
             out.append(u)
             continue
+        over, used = u.get('overlay'), 0.
         for k, (a, b) in enumerate(pieces):
-            out.append({**u, 'start': a, 'end': b, 'pauses': [], 'piece': k})
+            piece = {**u, 'start': a, 'end': b, 'pauses': [], 'piece': k}
+            if over:
+                v0 = over['start'] + used
+                piece['overlay'] = {**over, 'start': v0, 'end': min(over['end'], v0 + b - a)} if over['end'] - v0 >= .3 else None
+                used += b - a
+            out.append(piece)
     return out
 
 
@@ -1121,7 +1199,8 @@ def _merge_clips(kept, assets, rules, fps):
             cur = None if whole else {'asset_id': u['asset_id'], 'start': split, 'end': u['end'], 'frame': frame,
                                       'guided': {'units': [_brief(u)]}}
             continue
-        join = .04 if rules.get('tight') else .5   # 말 위주 편집은 쉼을 남기지 않는다
+        # 문장 사이 0.3초 미만 공백은 이어 붙여 자연스럽게(말 위주 편집·같은 문장의 쉼 조각은 이어 붙이지 않는다).
+        join = .04 if rules.get('tight') or u.get('piece') else .3
         if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < join:
             cur['end'] = max(cur['end'], u['end'])
             cur['guided']['units'].append(_brief(u))
@@ -1135,11 +1214,18 @@ def _merge_clips(kept, assets, rules, fps):
     out = []
     for i, c in enumerate(clips, 1):
         first = c['guided']['units'][0]
+        prev = out[-1] if out else None
         c['id'] = f'guided-{i:03}'
         c['label'] = f'{i}. {first["role_label"]}' + (f' · {first["text"][:30]}' if first['text'] else '')
         c['start'] = max(0., math.floor(c['start'] * fps + 1e-6) / fps)
         c['end'] = max(c['start'] + 1 / fps, math.ceil(c['end'] * fps - 1e-6) / fps)
         c['end'] = min(c['end'], math.floor(meta[c['asset_id']]['metadata']['duration'] * fps) / fps)
+        if prev and prev['asset_id'] == c['asset_id'] and prev['start'] < c['start'] < prev['end'] + 1e-6:
+            # 프레임 맞춤(시작 내림·끝 올림) 때문에 바로 이어지는 두 클립이 1프레임 겹치면 같은 소리가 두 번 난다.
+            shift = prev['end'] - c['start']
+            c['start'] = prev['end']
+            if c.get('visual_asset_id'):
+                c['visual_start'] += shift
         if c.get('visual_asset_id'):
             limit = meta[c['visual_asset_id']]['metadata']['duration']
             c['visual_start'] = max(0., min(c['visual_start'], limit - 2 / fps))
