@@ -1368,6 +1368,27 @@ def overlay_eating(kept, window=240.):
     """
     pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES and not u.get('bite')]
     used, count = set(), 0
+    # 점수("N점 드릴게요")가 나오면 다음 제품이다. 점수를 건너뛴 화면은 다른 제품이라 쓰지 않는다
+    # (예시 영상 피드백 '완전 딴 장면': 소금우유 소감 위에 점수 뒤 허니페어 개봉 화면이 얹혔다).
+    scores = {}
+    for u in kept:
+        if u['kind'] == 'speech' and 'score' in u['labels']:
+            scores.setdefault(u['asset_id'], []).append(u.get('speech_start', u['start']))
+    intros = {}
+    for u in kept:
+        if u['kind'] == 'speech' and set(u['labels']) & INTRO_LABELS:
+            intros.setdefault(u['asset_id'], []).append(u.get('speech_start', u['start']))
+    def same_product(asset_id, a, b):
+        lo, hi = min(a, b), max(a, b)
+        if any(lo < t < hi for t in scores.get(asset_id, [])):
+            return False
+        if len(scores.get(asset_id, [])) < 2:
+            return True
+        # 여러 제품 영상: 점수와 다음 제품 소개 사이(다음 제품을 미리 뜯는 등)는 어느 제품인지 모른다.
+        # 화면은 이 제품을 소개한 말 이후 것만 쓴다(1122 원본 359초: 호지차 소개 전 허니페어 개봉 화면).
+        last = max([t for t in scores[asset_id] if t <= lo] + [-1.])
+        first = min([t for t in intros.get(asset_id, []) if t > last] + [float('inf')])
+        return lo >= first - 1
     for s in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
         labels = set(s['labels'])
         if s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro', 'describe', 'compare'}:
@@ -1380,6 +1401,8 @@ def overlay_eating(kept, window=240.):
                 continue
             other = (v.get('product') or {}).get('name')
             if name and other and name != other:
+                continue
+            if not same_product(s['asset_id'], p['cursor'], s['speech_start'] if 'speech_start' in s else s['start']):
                 continue
             gap = s['start'] - v['end'] if v['end'] <= s['start'] else (v['start'] - s['end']) * 4 + 1   # 먹고 나서 말한 경우를 우선
             if 0 <= gap <= window and (best is None or gap < best[0]):

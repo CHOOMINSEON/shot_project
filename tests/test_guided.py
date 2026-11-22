@@ -734,3 +734,15 @@ def test_skip_swallowed_keeps_pieces_where_other_words_start():
     s0, gaps = guided.skip_swallowed(1127.77, 1131.1, [(1128.34, 1128.89)],
                                      [(1127.90, 1127.98), (1127.98, 1129.68), (1129.68, 1130.18), (1130.18, 1131.46)])
     assert s0 == 1127.77 and gaps == [(1128.34, 1128.89)]
+
+
+def test_eating_overlay_never_crosses_into_the_next_product():
+    # 점수 뒤(다음 제품) 먹는 화면을 앞 제품 소감 위에 얹지 않는다.
+    words = [w(1, ' 오늘은 초콜릿 두 개를 먹어볼게요.', 1, 4),
+             w(2, ' 단짠단짠해서 맛있네요.', 20, 23),
+             w(3, ' 이건 8점 드릴게요.', 30, 32),
+             w(4, ' 다음은 호지차예요.', 40, 42)]
+    frames = [frame(1, 34, 37, {'eating': .4}, shot=5)]
+    result, _, _ = run(words, frames=frames, duration=60)
+    taste = [c for c in result['clips'] if c['start'] < 24 and c['end'] > 20]
+    assert not any(c.get('visual_start', c['start']) >= 32 for c in taste), taste
