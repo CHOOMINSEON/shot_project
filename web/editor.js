@@ -99,17 +99,21 @@ window.addEventListener('pointercancel',()=>{if(!press)return;press.el.style.tra
 track().addEventListener('pointerdown',e=>{
   const h=e.target.closest('.trim');if(!h)return;const b=h.closest('[data-clip]'),i=+b.dataset.clip,c=project.state.clips[i];
   e.preventDefault();e.stopPropagation();b.draggable=false;h.setPointerCapture?.(e.pointerId);
-  trimming={i,side:h.dataset.trim,x:e.clientX,width:b.getBoundingClientRect().width,len:c.end-c.start,start:c.start,end:c.end,el:b,dt:0};
+  trimming={i,side:h.dataset.trim,x:e.clientX,width:b.getBoundingClientRect().width,left:b.offsetLeft,len:c.end-c.start,start:c.start,end:c.end,el:b,dt:0};b.classList.add('trimming');hideCut();
 });
 window.addEventListener('pointermove',e=>{
   if(!trimming)return;const t=trimming,dt=(e.clientX-t.x)/Math.max(20,t.width)*t.len;t.dt=dt;
   const a=project.assets.find(x=>x.id===project.state.clips[t.i].asset_id),max=a?.metadata.duration??Infinity;
   const v=t.side==='l'?Math.min(Math.max(0,t.start+dt),t.end-frame()):Math.max(Math.min(max,t.end+dt),t.start+frame());
-  t.value=snap(v);t.el.title=(t.side==='l'?'시작 ':'종료 ')+t.value.toFixed(2)+'초';
-  t.el.style.outline='2px solid #c0392b';
+  t.value=snap(v);const k=t.width/Math.max(1e-6,t.len),ns=t.side==='l'?t.value:t.start,ne=t.side==='l'?t.end:t.value;
+  // 끄는 동안 클립 모양·썸네일·시간 말풍선을 바로 바꿔 보여준다
+  t.el.style.left=(t.left+(ns-t.start)*k)+'px';t.el.style.width=Math.max(3,(ne-ns)*k-2)+'px';t.el.dataset.ts=ns;t.el.dataset.te=ne;
+  window.trimTip?.(t.el.offsetLeft+(t.side==='l'?0:t.el.offsetWidth),`${t.side==='l'?'시작':'끝'} ${clock(t.value,true)} · 길이 ${(ne-ns).toFixed(2)}초`);
+  requestAnimationFrame(()=>window.paintTracks?.());
 });
 window.addEventListener('pointerup',()=>{
-  if(!trimming)return;const t=trimming;trimming=null;t.el.draggable=true;t.el.style.outline='';
+  if(!trimming)return;const t=trimming;trimming=null;t.el.draggable=true;t.el.classList.remove('trimming');delete t.el.dataset.ts;delete t.el.dataset.te;window.trimTip?.(null);
+  if(t.value===undefined||Math.abs(t.dt)<1e-6){window.layoutTimeline?.();return;}
   if(t.value===undefined||Math.abs(t.dt)<1e-6)return;
   const key=t.side==='l'?'start':'end';
   mutate(s=>{s.clips[t.i][key]=t.value;}).then(()=>selectClip(t.i,false)).catch(error=>toast(error.message));
@@ -144,6 +148,8 @@ const mainCanvas=document.createElement('canvas');mainCanvas.className='row-canv
 const layerBox=document.createElement('div');layerBox.className='tl-layers';
 wrap.prepend(content);mainRow.append(mainCanvas,track());content.append(ruler,mainRow,layerBox);
 const lineHead=wrap.querySelector('.playhead');content.appendChild(lineHead);content.appendChild(cut);
+const tip=document.createElement('div');tip.className='trim-tip hidden';content.appendChild(tip);
+window.trimTip=(x,text)=>{if(x===null){tip.classList.add('hidden');return;}tip.style.left=x+'px';tip.style.top=(wrap.scrollTop+26)+'px';tip.textContent=text;tip.classList.remove('hidden');};
 let zoom=1;try{zoom=Math.max(1,+localStorage.getItem('studio-zoom')||1);}catch{}
 const layers=()=>project?.state.layers||[];
 const layerLen=l=>l.end-l.start;
@@ -249,7 +255,7 @@ function paint(){
   if(!project)return;const sx=wrap.scrollLeft;
   {const [ctx,vw,h]=rowCanvas(mainCanvas,mainRow);
     track().querySelectorAll('[data-clip]').forEach(el=>{const c=project.state.clips[+el.dataset.clip];if(!c)return;
-      drawItem(ctx,vw,el.offsetLeft+(+el.dataset.dx||0)-sx,el.offsetWidth,0,h,c.asset_id,c.start,c.end-c.start,.64);});}
+      const cs=el.dataset.ts?+el.dataset.ts:c.start,ce=el.dataset.te?+el.dataset.te:c.end;drawItem(ctx,vw,el.offsetLeft+(+el.dataset.dx||0)-sx,el.offsetWidth,0,h,c.asset_id,cs,ce-cs,.64);});}
   layerBox.querySelectorAll('.layer-row').forEach(row=>{const [ctx,vw,h]=rowCanvas(row.querySelector('canvas'),row);
     row.querySelectorAll('[data-layer]').forEach(el=>{const l=layers().find(x=>x.id===el.dataset.layer);if(!l)return;
       drawItem(ctx,vw,el.offsetLeft-sx,el.offsetWidth,0,h,l.asset_id,l.start,layerLen(l),.6);});});
@@ -274,7 +280,8 @@ window.addEventListener('pointermove',e=>{
   if(ltrim){const t=ltrim,p=pps(),dt=(e.clientX-t.x)/p,a=project.assets.find(x=>x.id===t.l.asset_id),max=a?.metadata.duration??Infinity;
     if(t.side==='l'){const s=snap(Math.min(Math.max(0,t.l.start+dt,t.l.start-t.l.at),t.l.end-frame()));t.v={start:s,at:snap(t.l.at+s-t.l.start)};}
     else t.v={end:snap(Math.max(Math.min(max,t.l.end+dt),t.l.start+frame()))};
-    const n={...t.l,...t.v};t.el.style.left=n.at*p+'px';t.el.style.width=Math.max(3,(n.end-n.start)*p-2)+'px';requestAnimationFrame(paint);return;}
+    const n={...t.l,...t.v};t.el.style.left=n.at*p+'px';t.el.style.width=Math.max(3,(n.end-n.start)*p-2)+'px';t.el.classList.add('trimming');
+    window.trimTip((t.side==='l'?n.at:n.at+n.end-n.start)*p,`${t.side==='l'?'시작':'끝'} ${clock(t.side==='l'?n.start:n.end,true)} · 길이 ${(n.end-n.start).toFixed(2)}초`);requestAnimationFrame(paint);return;}
   if(!lpress)return;const dx=e.clientX-lpress.x,dy=e.clientY-lpress.y;
   if(!lpress.moved){if(Math.abs(dx)<6&&Math.abs(dy)<6)return;lpress.moved=true;hideCut();lpress.el.classList.add('moving');document.body.classList.add('clip-moving');}
   const at=snap(Math.max(0,lpress.l.at+dx/pps()));lpress.at=at;lpress.el.style.left=at*pps()+'px';
@@ -285,7 +292,7 @@ window.addEventListener('pointermove',e=>{
   requestAnimationFrame(paint);
 });
 window.addEventListener('pointerup',e=>{
-  if(ltrim){const t=ltrim;ltrim=null;if(!t.v)return;mutate(s=>{const l=s.layers.find(x=>x.id===t.id);if(l)Object.assign(l,t.v);}).catch(error=>toast(error.message));return;}
+  if(ltrim){const t=ltrim;ltrim=null;window.trimTip(null);t.el.classList.remove('trimming');if(!t.v)return;mutate(s=>{const l=s.layers.find(x=>x.id===t.id);if(l)Object.assign(l,t.v);}).catch(error=>toast(error.message));return;}
   if(!lpress)return;const p=lpress;lpress=null;document.body.classList.remove('clip-moving');content.querySelectorAll('.drop-row').forEach(r=>r.classList.remove('drop-row'));clearDrop();
   if(!p.moved){layerClick(p.l,e);return;}
   if(p.target==='main'){
