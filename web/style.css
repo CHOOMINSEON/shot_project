@@ -243,3 +243,22 @@ label.check:has(#guided-fast) .muted{display:none}
 .upload-zone>span:not(.upload-icon),#loaded-count,.library p.muted,.library .privacy,
 .guided-editor>.eyebrow,#guided-title,.guided-editor .script-inputs label>.muted,.guided-editor>p.muted,.guided-editor p.muted{display:none!important}
 .studio .story-panel{padding-top:10px}
+/* 6차: 미리보기 다시 키우기, 영상 줄·버튼 빼기, 제목 아래로, 왼쪽 아래 단축키 */
+.studio .timeline{height:auto;flex:0 0 auto}
+.studio .timeline .media-row,.studio .timeline-heading .button-row{display:none!important}
+.studio .timeline-heading{margin:2px 0 0;padding:0;border:0}
+.studio .timeline-heading h2{font-size:12px}
+.studio .track-wrap{flex:0 0 auto;height:clamp(150px,21vh,230px);min-height:0}
+.studio .timeline-ruler{margin:4px 0 4px}
+section.timeline{position:relative}
+section.timeline.drag::after{content:'여기에 놓으면 영상·폴더를 바로 불러와요';position:absolute;inset:6px;display:flex;align-items:center;justify-content:center;border:2px dashed #9aa4b2;border-radius:12px;background:rgba(20,20,20,.72);color:#fff;font-weight:700;font-size:15px;pointer-events:none;z-index:20}
+.shortcut-card{margin-top:auto;flex:0 0 auto;background:var(--panel,#27282c);border:1px solid var(--line);border-radius:13px;padding:10px 12px;font-size:11px;color:var(--muted)}
+.shortcut-card>b{display:block;color:var(--ink);font-size:12px;margin-bottom:6px}
+.shortcut-card dl{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;margin:0;align-items:center}
+.shortcut-card dt{margin:0;white-space:nowrap}.shortcut-card dd{margin:0}
+.shortcut-card kbd{font:inherit;font-size:10px;border:1px solid #66686f;border-radius:4px;padding:0 4px;color:var(--ink);background:var(--raised,#303237)}
+.shortcut-card{padding:8px 10px;font-size:10px}
+.shortcut-card>b{font-size:11px;margin-bottom:4px}
+.shortcut-card dl{grid-template-columns:auto 1fr auto 1fr;gap:3px 5px}
+.shortcut-card kbd{font-size:9px;padding:0 3px}
+@media(max-height:950px){.studio .upload-zone{padding:10px 8px;margin:10px 0 8px}.studio .upload-zone .upload-icon{width:32px;height:32px;font-size:20px}.studio .library .storage{margin-top:8px}.studio-left{gap:8px}}
