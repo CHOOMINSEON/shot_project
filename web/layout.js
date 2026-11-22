@@ -41,7 +41,7 @@ const tlHead=timeline?.querySelector('.timeline-heading'),tlTools=timeline?.quer
 if(tlHead&&tlTools)tlTools.after(tlHead);
 // 왼쪽 아래: 단축키 모음
 const keys=document.createElement('div');keys.className='shortcut-card';
-keys.innerHTML='<b>단축키<span id="app-version"></span></b><dl>'+[['Space','재생'],['B','자르기 도구'],['A','선택 도구'],['E','여기서 자르기'],['Q','왼쪽 삭제'],['W','오른쪽 삭제'],['Del','삭제'],['Ctrl+D','복제'],['Ctrl+Z','취소'],['Ctrl+Y','다시'],['Ctrl+C','복사'],['Ctrl+V','붙여넣기'],['Ctrl+X','잘라내기'],['[ ]','구간 이동'],['← →','1프레임'],['Shift+← →','1초']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')+'</dl>';
+keys.innerHTML='<b>단축키<span id="app-version"></span></b><dl>'+[['Space','재생'],['B','자르기 도구'],['A','선택 도구'],['E','여기서 자르기'],['Q','왼쪽 삭제'],['W','오른쪽 삭제'],['Del','삭제'],['Ctrl+D','복제'],['Ctrl+Z','취소'],['Ctrl+Y','다시'],['Ctrl+C','복사'],['Ctrl+V','붙여넣기'],['Ctrl+X','잘라내기'],['[ ]','구간 이동'],['← →','타임라인 좌우 이동'],[', .','1프레임'],['Shift+, .','1초'],['↑ ↓','이전·다음 컷'],['휠','좌우 이동'],['Alt+휠','위아래 줄'],['Ctrl+휠','확대·축소']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')+'</dl>';
 left.appendChild(keys);
 const old=[...main.children];
 main.append(left,center,right);
