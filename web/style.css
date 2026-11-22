@@ -306,3 +306,11 @@ body.clip-moving,body.clip-moving *{cursor:grabbing!important;user-select:none}
 .zoom-box button{background:transparent;color:#bdbdc4;font-size:12px;padding:2px 7px}
 .zoom-box input{width:120px;accent-color:#cfd0d4}
 .studio .timeline-heading{display:flex;align-items:center;gap:8px}
+/* 11차: 시간 눈금자 + 재생헤드(손잡이 끌어서 탐색) */
+.tl-ruler{position:sticky;top:0;z-index:4;height:24px;background:#1d1e22;border-bottom:1px solid #3a3c42;font-size:10px;color:#c9cad0;cursor:pointer;overflow:hidden;user-select:none}
+.tl-ruler span.mj{position:absolute;top:0;bottom:0;padding:2px 0 0 4px;border-left:1px solid #8a8d96;height:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tl-ruler i{position:absolute;bottom:0;height:5px;border-left:1px solid #5a5d64}
+.tl-ruler i.md{height:9px;border-left-color:#757880}
+.tl-content>.playhead{bottom:auto;z-index:7;pointer-events:none}
+.ph-handle{position:absolute;top:0;left:-6px;width:14px;height:18px;background:#fff;clip-path:polygon(0 0,100% 0,100% 62%,50% 100%,0 62%);pointer-events:auto;cursor:ew-resize}
+body.scrubbing,body.scrubbing *{cursor:ew-resize!important;user-select:none}
