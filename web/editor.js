@@ -49,8 +49,11 @@ track().addEventListener('click',e=>{
   const b=e.target.closest('[data-clip]');if(!b)return;e.stopImmediatePropagation();const i=+b.dataset.clip;
   if(e.shiftKey){if(editMulti.has(i))editMulti.delete(i);else editMulti.add(i);if(!editMulti.has(selected))editMulti.add(selected);draw();return;}
   editMulti.clear();
-  const c=project.state.clips[i],r=b.getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
-  selectClip(i,false);setSource('/api/assets/'+c.asset_id+'/video',snap(c.start+(c.end-c.start)*f),false);
+  const c=project.state.clips[i],r=b.getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),at=snap(c.start+(c.end-c.start)*f);
+  if(tool==='blade'&&at>c.start+frame()/2&&at<c.end-frame()/2){hideCut();
+    mutate(s=>{const old=s.clips[i];s.clips.splice(i,1,{...old,end:at},{...clone(old),id:uuid(),start:at});})
+      .then(()=>{selectClip(i+1,false);}).catch(error=>toast(error.message));return;}
+  selectClip(i,false);setSource('/api/assets/'+c.asset_id+'/video',at,false);
 },true);
 
 // 구간 끌어서 순서 변경
@@ -84,6 +87,56 @@ window.addEventListener('pointerup',()=>{
   mutate(s=>{s.clips[t.i][key]=t.value;}).then(()=>selectClip(t.i,false)).catch(error=>toast(error.message));
 });
 
+// 도구: 자르기(B, 마우스를 올리면 자를 위치 선이 보이고 클릭하면 그 자리에서 잘림) / 선택(A, 클릭하면 선택·이동)
+let tool='blade';try{if(localStorage.getItem('studio-tool')==='select')tool='select';}catch{}
+const toolBox=document.createElement('span');toolBox.className='tool-toggle';
+toolBox.innerHTML='<button type="button" data-tool="select" title="선택 도구 (A)">↖ 선택 <kbd>A</kbd></button><button type="button" data-tool="blade" title="자르기 도구 (B): 클릭한 자리에서 잘라요">✂ 자르기 <kbd>B</kbd></button>';
+$('ed-split')?.parentElement?.prepend(toolBox);
+function setTool(t){tool=t;toolBox.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));track().classList.toggle('blade',t==='blade');if(t!=='blade')hideCut();try{localStorage.setItem('studio-tool',t);}catch{}}
+toolBox.addEventListener('click',e=>{const b=e.target.closest('[data-tool]');if(b)setTool(b.dataset.tool);});
+setTool(tool);
+const cut=document.createElement('div');cut.className='cutline hidden';cut.innerHTML='<span></span>';track().parentElement.appendChild(cut);
+function hideCut(){cut.classList.add('hidden');}
+track().addEventListener('mousemove',e=>{
+  if(tool!=='blade'||trimming||dragFrom!==null||e.target.closest('.trim')){hideCut();return;}
+  const b=e.target.closest('[data-clip]');if(!b){hideCut();return;}
+  const c=project?.state.clips[+b.dataset.clip];if(!c){hideCut();return;}
+  const r=b.getBoundingClientRect(),tr=track().getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
+  const t=snap(c.start+(c.end-c.start)*f);let off=0;for(let k=0;k<+b.dataset.clip;k++)off+=project.state.clips[k].end-project.state.clips[k].start;
+  cut.style.left=(e.clientX-tr.left+track().scrollLeft)+'px';cut.firstChild.textContent=clock(off+t-c.start,true);cut.classList.remove('hidden');
+});
+track().addEventListener('mouseleave',hideCut);
+track().addEventListener('dragstart',hideCut);
+
+// 캡컷처럼 구간마다 영상(썸네일 띠)·오디오(파형) 트랙을 위아래로 그린다
+const strips={},peaks={};
+function strip(id){const a=project?.assets.find(x=>x.id===id);if(!a||a.status!=='ready'||a.metadata?.has_video===false)return null;
+  if(!strips[id]){const img=new Image();img.onload=()=>{img.ready=true;paint();};img.onerror=()=>{img.failed=true;};img.src='/api/assets/'+id+'/filmstrip.jpg';strips[id]=img;}return strips[id];}
+function wave(id){const a=project?.assets.find(x=>x.id===id);if(!a||a.status!=='ready')return null;
+  if(!peaks[id]){peaks[id]={loading:true};fetch('/api/assets/'+id+'/peaks',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(d=>{peaks[id]=d&&d.peaks?d:{peaks:[],rate:10};paint();}).catch(()=>{peaks[id]={peaks:[],rate:10};});}
+  return peaks[id].peaks?peaks[id]:null;}
+function sized(cv){const d=devicePixelRatio||1,w=Math.max(1,Math.round(cv.clientWidth*d)),h=Math.max(1,Math.round(cv.clientHeight*d));if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}const ctx=cv.getContext('2d');ctx.clearRect(0,0,w,h);return [ctx,w,h];}
+function paint(){
+  if(!project)return;
+  track().querySelectorAll('[data-clip]').forEach(b=>{
+    const c=project.state.clips[+b.dataset.clip];if(!c)return;const len=Math.max(.001,c.end-c.start);
+    const a=project.assets.find(x=>x.id===c.asset_id),dur=a?.metadata?.duration||c.end;
+    const film=b.querySelector('.clip-film'),au=b.querySelector('.clip-wave');
+    if(film){const [ctx,w,h]=sized(film),img=strip(c.asset_id);
+      if(img?.ready){const n=Math.max(1,Math.round(img.naturalWidth/54)),tw=Math.max(8,h*54/96),tiles=Math.ceil(w/tw);
+        for(let j=0;j<tiles;j++){const t=c.start+(j+.5)*tw/w*len,k=Math.min(n-1,Math.max(0,Math.floor(t/dur*n)));ctx.drawImage(img,k*54,0,54,96,j*tw,0,tw,h);}}
+      else if(a?.metadata?.has_video===false){ctx.fillStyle='#ffffff80';ctx.font=`${Math.round(h*.4)}px sans-serif`;ctx.fillText('♫',8,h*.65);}}
+    if(au){const [ctx,w,h]=sized(au),p=wave(c.asset_id);
+      if(p&&p.peaks.length){const rate=p.rate||10,step=Math.max(2,Math.round(3*(devicePixelRatio||1))),bar=Math.max(1,step-1);ctx.fillStyle='#4fd8de';
+        for(let x=0;x<w;x+=step){const t0=c.start+x/w*len,t1=c.start+(x+step)/w*len;let m=0;for(let q=Math.floor(t0*rate);q<=Math.min(p.peaks.length-1,Math.floor(t1*rate));q++)m=Math.max(m,p.peaks[q]||0);
+          const bh=Math.max(1,Math.min(1,Math.sqrt(m))*(h-4));ctx.fillRect(x,h-bh-1,bar,bh);}}
+      else{ctx.fillStyle='#4fd8de55';ctx.fillRect(0,h-2,w,1);}}
+  });
+}
+window.paintTracks=paint;
+new MutationObserver(()=>requestAnimationFrame(paint)).observe(track(),{childList:true});
+if(window.ResizeObserver)new ResizeObserver(()=>requestAnimationFrame(paint)).observe(track());
+
 // 재생 위치 표시선
 function drawPlayhead(){
   const el=$('playhead'),h=playhead();if(!h||!track().children.length){el.classList.add('hidden');return;}
@@ -107,6 +160,8 @@ document.addEventListener('keydown',e=>{
   if(ctrl&&key.toLowerCase()==='x')return run(cutClips);
   if(ctrl&&key.toLowerCase()==='v')return run(pasteClips);
   if(ctrl||e.altKey)return;
+  if(key==='b'||key==='B')return run(()=>setTool('blade'));
+  if(key==='a'||key==='A')return run(()=>setTool('select'));
   if(key==='e'||key==='E')return run(splitHere);
   if(key==='q'||key==='Q')return run(trimHead);
   if(key==='w'||key==='W')return run(trimTail);

@@ -550,6 +550,87 @@ def thumbnail(ident: str):
     return FileResponse(path, media_type='image/jpeg')
 
 
+_strip_locks={}
+
+
+def _strip_lock(key):
+    import threading
+    return _strip_locks.setdefault(key, threading.Lock())
+
+
+STRIP_W, STRIP_H = 54, 96
+
+
+@app.get('/api/assets/{ident}/filmstrip.jpg')
+def filmstrip(ident: str):
+    """타임라인 영상 트랙용 썸네일 띠. 영상 전체에서 고르게 뽑은 프레임을 54x96 칸으로 가로로 이어 붙인다."""
+    import subprocess, tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+    asset = db.get_asset(ident)
+    if asset['status'] != 'ready' or not asset['metadata'].get('has_video', True):
+        raise HTTPException(404)
+    folder = DATA / 'assets' / asset['id']
+    path = folder / 'filmstrip.jpg'
+    with _strip_lock('film:' + asset['id']):
+        if not path.exists():
+            duration = float(asset['metadata'].get('duration') or 0)
+            count = max(4, min(90, math.ceil(duration / 2))) if duration > 0 else 1
+            source = str(worker.asset_path(asset['id']))
+            with tempfile.TemporaryDirectory() as tmp:
+                def grab(k):
+                    out = Path(tmp) / f'{k:03d}.jpg'
+                    at = (k + .5) * duration / count if duration > 0 else 0
+                    try:
+                        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', f'{at:.3f}', '-i', source, '-frames:v', '1',
+                                        '-vf', f'scale={STRIP_W}:{STRIP_H}:force_original_aspect_ratio=increase,crop={STRIP_W}:{STRIP_H}', str(out)],
+                                       capture_output=True, timeout=120, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+                    return out
+                with ThreadPoolExecutor(4) as pool:
+                    frames = list(pool.map(grab, range(count)))
+                sheet = Image.new('RGB', (STRIP_W * count, STRIP_H), (14, 93, 99))
+                last = None
+                for k, frame in enumerate(frames):
+                    try:
+                        with Image.open(frame) as image:
+                            last = image.convert('RGB').resize((STRIP_W, STRIP_H))
+                    except OSError:
+                        pass
+                    if last is not None:
+                        sheet.paste(last, (k * STRIP_W, 0))
+                partial = folder / 'filmstrip.part.jpg'
+                sheet.save(partial, quality=78)
+                os.replace(partial, path)
+    return FileResponse(path, media_type='image/jpeg', headers={'Cache-Control': 'private, max-age=86400'})
+
+
+@app.get('/api/assets/{ident}/peaks')
+def audio_peaks(ident: str):
+    """타임라인 오디오 트랙용 파형(초당 10개, 0~1)."""
+    import subprocess
+    import numpy as np
+    asset = db.get_asset(ident)
+    if asset['status'] != 'ready':
+        raise HTTPException(409, '영상 검사가 완료되지 않았습니다.')
+    folder = DATA / 'assets' / asset['id']
+    path = folder / 'peaks.json'
+    with _strip_lock('peaks:' + asset['id']):
+        if not path.exists():
+            try:
+                raw = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(worker.asset_path(asset['id'])), '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', '-'],
+                                     capture_output=True, timeout=1800, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+            except (OSError, subprocess.SubprocessError):
+                raw = b''
+            x = np.frombuffer(raw[:len(raw) // 1600 * 1600], np.int16).reshape(-1, 800)
+            peaks = (np.abs(x.astype(np.int32)).max(1) / 32768.).round(3).tolist() if len(x) else []
+            partial = folder / 'peaks.part.json'
+            partial.write_text(json.dumps({'rate': 10, 'peaks': peaks}), encoding='utf-8')
+            os.replace(partial, path)
+    return FileResponse(path, media_type='application/json', headers={'Cache-Control': 'private, max-age=86400'})
+
+
 class Analysis(BaseModel):
     asset_id: str
     transcribe: bool = True

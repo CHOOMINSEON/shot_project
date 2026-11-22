@@ -209,3 +209,32 @@ label.check:has(#guided-fast) .muted{display:none}
 .story-panel p{margin:0;font-size:11.5px}
 #storyboard-text{flex:1 1 auto;min-height:520px;width:100%;resize:vertical;font:inherit;font-size:13px;line-height:1.6;padding:12px;border:1px solid var(--line);border-radius:9px}
 .studio-right[data-rail=story]{overflow:auto}
+/* 5차: 미리보기 줄이고 타임라인 키우기, 왼쪽 패널 위쪽 맞춤, 캡컷식 영상·오디오 트랙 */
+.library-box{margin:0}
+.studio .viewer{flex:1 1 0;min-height:220px}
+.studio .video-stage{min-height:160px}
+.studio .timeline{flex:0 0 auto;height:max(330px,45vh);max-height:none;display:flex;flex-direction:column;overflow:hidden}
+.studio .timeline>*{flex:0 0 auto}
+.studio .timeline .media-row .asset-list{max-height:76px}
+.studio #waveform{display:none}
+.studio .timeline-ruler{margin:6px 0 4px}
+.studio .track-wrap{flex:1 1 auto;min-height:120px;display:flex;flex-direction:column}
+.studio .timeline-track{flex:1 1 auto;align-items:stretch;padding:4px 0 8px;gap:2px;min-height:0}
+.studio .timeline-clip{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:4px;padding:0;background:transparent!important;border:0!important;border-radius:4px;overflow:visible;color:#e9f7f8}
+.studio .timeline-clip .clip-head{position:absolute;left:4px;right:4px;top:3px;z-index:2;display:flex;align-items:center;gap:5px;overflow:hidden;white-space:nowrap;font-size:10px;pointer-events:none;text-shadow:0 1px 2px #000}
+.studio .timeline-clip .clip-name{overflow:hidden;text-overflow:ellipsis}
+.clip-film{display:block;flex:1.6 1 0;min-height:44px;width:100%;background:#0e5d63;border-radius:4px;pointer-events:none}
+.clip-wave{display:block;flex:1 1 0;min-height:30px;width:100%;background:#0b4a4f;border-radius:4px;pointer-events:none}
+.studio .timeline-clip.active .clip-film,.studio .timeline-clip.active .clip-wave{outline:2px solid #ffffff;outline-offset:-2px}
+.studio .timeline-clip.multi .clip-film,.studio .timeline-clip.multi .clip-wave{outline:2px solid #a9a9b0;outline-offset:-2px}
+.studio .timeline-clip.multi{outline:0}
+.studio .trim{z-index:3;width:9px}
+.studio .timeline-track.blade .timeline-clip{cursor:crosshair}
+.studio .playhead{top:0;bottom:8px;z-index:4;background:#ffffff}
+.cutline{position:absolute;top:0;bottom:8px;width:0;border-left:2px dashed #ff5a5a;pointer-events:none;z-index:5}
+.cutline span{position:absolute;top:-2px;left:4px;background:#ff5a5a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;white-space:nowrap}
+.tool-toggle{display:inline-flex;background:var(--raised,#2a2b2f);border-radius:7px;padding:2px;gap:2px;margin-right:6px}
+.tool-toggle button{background:transparent;color:#bdbdc4;font-size:11px;padding:4px 8px}
+.tool-toggle button.active{background:#4a4c53;color:#fff}
+.tool-toggle kbd{font:inherit;font-size:9px;border:1px solid #777;border-radius:3px;padding:0 3px;margin-left:3px}
+@media(max-width:980px){.studio .timeline{height:auto}.studio .track-wrap{min-height:150px}}
