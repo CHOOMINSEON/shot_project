@@ -2,11 +2,13 @@
 // 편집 지침 기반 자동 편집 화면. app.js의 전역(project, api, poll, mutate 등)을 사용한다.
 let guidedAudioSrc=new Set(),guidedAudioKey='';
 let guidedDefaults=null,guidedLoading=false,guidedFormProject=null,guidedRenderKey='';
+let styleProfile=null,styleLearning=false;
 const GUIDED_REASON={prep:'촬영 준비·대기',retake:'말실수 재시도',repeat:'반복 설명',length:'목표 길이 초과',long_visual:'말 없는 장면이 김'};
 
 async function loadGuidedDefaults(){
  if(guidedDefaults||guidedLoading)return;guidedLoading=true;
  try{guidedDefaults=await api('/guided/defaults');
+  styleProfile=(await api('/style-profile')).profile;
   $('guided-style').innerHTML='<option value="auto">자동 추정 (업로드 구성으로 판단)</option>'+guidedDefaults.styles.map(s=>`<option value="${esc(s.key)}">${esc(s.name)}</option>`).join('');
   guidedFormProject=null;drawGuided();}
  catch(error){/* 로그인 전에는 다시 시도 */}finally{guidedLoading=false;}
@@ -49,8 +51,21 @@ function drawGuided(){
  else $('guided-status').textContent=ready?'편집 지침을 확인하고 자동 편집을 시작하세요. 음성 모델 준비 중이면 장면 분석만 먼저 사용합니다.':'왼쪽에서 촬영 원본을 올려주세요. 프로젝트는 자동으로 만들어져요.';
  $('guided-downloads').innerHTML=exportable?(latestExport.result.files||[]).filter(f=>['video','archive','subtitle'].includes(f.type)).map(f=>`<a class="button ${f.type==='video'?'primary':'secondary'}" href="/api/exports/${latestExport.id}/${encodeURIComponent(f.name)}">${f.type==='subtitle'&&f.name.includes('표기')?'표기(유료광고·강조 자막) SRT':{video:'MP4',archive:'ZIP(MP4·SRT·컷 목록)',subtitle:'SRT'}[f.type]} 다운로드 · ${bytes(f.size)}</a>`).join(''):'';
  if(!exportable&&project?.state.guided?.overlays?.length)$('guided-downloads').innerHTML=`<a class="button secondary" href="/api/projects/${project.id}/overlays.srt">표기(유료광고·강조 자막) SRT 다운로드</a>`;
+ const cuts=project?.state.clips.length||0;
+ $('guided-learn').disabled=cuts<3||busy||styleLearning;
+ $('guided-learn').textContent=styleLearning?'내 편집 스타일 학습 중…':'이 편집본으로 내 편집 스타일 학습';
+ $('guided-profile-clear').classList.toggle('hidden',!styleProfile);
+ $('guided-profile').textContent=styleProfileText(cuts);
  const key=[latestGuided?.id,latestGuided?.updated,project?.revision].join(':');
  if(key!==guidedRenderKey){guidedRenderKey=key;$('guided-report').innerHTML=r?guidedReport(r):'';}
+}
+
+function styleProfileText(cuts){
+ const p=styleProfile;
+ const hint=cuts<3?'타임라인을 직접 다듬어 컷이 3개 이상이 되면 학습할 수 있어요.':'타임라인을 마음에 들게 다듬은 뒤 누르면, 컷 길이 습관을 이후 모든 프로젝트의 자동 편집에 반영해요.';
+ if(!p)return '내 편집 스타일: 아직 학습 안 함. '+hint;
+ const when=p.learned_at?new Date(p.learned_at*1000).toLocaleDateString('ko-KR'):'';
+ return `내 편집 스타일: ${p.project_name?'‘'+p.project_name+'’ ':''}${when?when+' ':''}학습 · 컷 ${p.clips}개, 보통 ${p.median_clip.toFixed(1)}초 (평균 ${p.avg_clip.toFixed(1)}초)`+(p.avg_removed_gap!=null?` · 컷 사이 평균 ${p.avg_removed_gap.toFixed(1)}초 잘라냄`:'')+`. 다음 자동 편집부터 말 없는 컷을 최대 ${Math.max(2,Math.min(8,p.median_clip*1.5)).toFixed(1)}초로 맞춰요(원샷 유형 제외). 다른 편집본으로 다시 학습하면 덮어써요.`;
 }
 
 function guidedReport(r){
@@ -92,6 +107,15 @@ bind('guided-style','change',()=>{
  const map=guidedDefaults?.guidelines||{},texts=Object.values(map),cur=$('guided-text').value.trim();
  if(!cur||texts.some(t=>t.trim()===cur)){$('guided-text').value=$('guided-style').value==='commentary'?map.commentary:map.default;}
  drawGuided();});
+action('guided-learn',async()=>{
+ requireProject();await saveQueue;
+ styleLearning=true;drawGuided();
+ try{styleProfile=(await api('/projects/'+project.id+'/style-profile',{method:'POST'})).profile;toast(`내 편집 스타일을 학습했어요. 보통 컷 ${styleProfile.median_clip.toFixed(1)}초 기준으로 다음 자동 편집에 반영해요.`);}
+ finally{styleLearning=false;drawGuided();}
+});
+action('guided-profile-clear',async()=>{
+ styleProfile=(await api('/style-profile',{method:'DELETE'})).profile;drawGuided();toast('학습한 편집 스타일을 지웠어요. 다음 자동 편집은 기본값으로 해요.');
+});
 action('guided-play',()=>{
  const r=latestGuided?.result,video=r?.files?.find(f=>f.type==='video');
  if(video&&r.render_signature===project.render_signature){rendered=latestGuided.id;mode='edited';setSource('/api/exports/'+rendered+'/'+encodeURIComponent(video.name)+'?inline=true',0,true);$('preview-label').textContent='지침 자동 편집 추천본 · 미리보기 화질';}

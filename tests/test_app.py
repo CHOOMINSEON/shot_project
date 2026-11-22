@@ -236,3 +236,19 @@ def test_two_hour_duration_metadata_limit(tmp_path):
         else:
             with pytest.raises(ValueError, match='2시간'):
                 probe(path)
+
+
+def test_style_profile_learn_and_clear(owner, sample):
+    from studio import guided
+    p, _ = upload_video(owner, sample)
+    assert owner.post(f'/api/projects/{p["id"]}/style-profile').status_code == 422  # 컷 3개 미만
+    a = p['assets'][0]['id']
+    state = {**p['state'], 'clips': [{'id': f'c{i}', 'asset_id': a, 'start': i * 2, 'end': i * 2 + 1.5,
+                                      'frame': {'mode': 'fit', 'x': .5, 'y': .5, 'zoom': 1}} for i in range(4)]}
+    p = owner.put(f'/api/projects/{p["id"]}', json={'revision': p['revision'], 'state': state, 'name': p['name']}).json()
+    learned = owner.post(f'/api/projects/{p["id"]}/style-profile').json()['profile']
+    assert learned['clips'] == 4 and learned['median_clip'] == 1.5 and learned['project_name'] == p['name']
+    assert owner.get('/api/style-profile').json()['profile']['median_clip'] == 1.5
+    assert guided.load_profile()['median_clip'] == 1.5  # 다른 프로젝트 자동 편집에도 쓰이는 앱 전체 저장
+    assert owner.delete('/api/style-profile').json()['profile'] is None
+    assert owner.get('/api/style-profile').json()['profile'] is None

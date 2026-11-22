@@ -559,7 +559,7 @@ def guided_edit(ident, payload):
                                          [{'asset_id': h['asset_id'], 'start': h['start'], 'end': h['end'], 'exact': False} for h in found['supporting']]
         if payload.get('frame') in ('blur', 'fill', 'fit'):
             rules['frame'] = payload['frame']
-        rules = guided.apply_profile(rules, before.get('style_profile'))
+        rules = guided.apply_profile(rules, before.get('style_profile') or guided.load_profile())
         stage_log(ident, '제품 근거 계산 끝')
         speed = 1.   # 배속은 넣지 않는다(사용자가 캡컷에서 직접 적용)
         update(ident, .5, '지침에 따라 구간 선택·구성')

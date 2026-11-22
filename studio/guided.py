@@ -11,8 +11,10 @@
 이 모듈은 FastAPI/모델 없이 순수 Python으로 동작한다(테스트 가능).
 """
 import difflib
+import json
 import math
 import re
+import time
 
 # 기본 편집 지침(사용자가 화면에서 수정 가능). 실행 파일에 함께 들어가도록 코드에 포함한다.
 DEFAULT_GUIDELINE = """업로드한 영상에서 중요한 부분을 골라 세로 9:16 숏폼으로 편집해줘.
@@ -1175,6 +1177,34 @@ def learn_profile(state, assets):
     return {'clips': len(clips), 'avg_clip': round(sum(lengths) / len(lengths), 2), 'median_clip': round(lengths[len(lengths) // 2], 2),
             'total': round(sum(lengths), 2), 'avg_removed_gap': round(sum(kept_pauses) / len(kept_pauses), 2) if kept_pauses else None,
             'note': '직접 수정한 편집본 기준 통계입니다. 다음 자동 편집의 컷 길이 상한과 목표 길이에 참고합니다.'}
+
+
+def _profile_path():
+    from .settings import DATA
+    return DATA / 'style_profile.json'
+
+
+def load_profile():
+    """앱 전체에 저장된 '내 편집 스타일'(없으면 None)."""
+    try:
+        value = json.loads(_profile_path().read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value.get('median_clip') else None
+
+
+def save_profile(profile, project_name=''):
+    """학습 결과를 앱 전체에 저장해 이후 모든 프로젝트의 자동 편집에 쓴다."""
+    profile = {**profile, 'project_name': project_name, 'learned_at': time.time()}
+    path = _profile_path()
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8')
+    tmp.replace(path)
+    return profile
+
+
+def clear_profile():
+    _profile_path().unlink(missing_ok=True)
 
 
 def apply_profile(rules, profile):
