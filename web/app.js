@@ -52,7 +52,7 @@ function draw(){
   $('analysis-asset').innerHTML=project.assets.filter(a=>a.status==='ready').map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');$('analysis-asset').value=activeAsset||'';
   $('vocabulary').value=project.state.vocabulary||'';$('reference-script').value=project.state.reference_script||'';$('fps').value=project.state.fps||30;$('quality').value=project.state.quality||'standard';
   const length=editedLength();$('total-time').textContent=clock(length);$('export-duration').textContent=clock(length);$('timeline-end').textContent=clock(length);$('timeline-mid').textContent=clock(length/2);$('clip-count').textContent=`${project.state.clips.length}개 구간`;
-  $('timeline-track').innerHTML=project.state.clips.map((c,i)=>`<button class="timeline-clip ${i===selected?'active':''} ${typeof editMulti!=='undefined'&&editMulti.has(i)?'multi':''}" draggable="false" data-clip="${i}" style="flex:${Math.max(.3,c.end-c.start)} 1 0" title="${esc(c.label)} · ${clock(c.start)}–${clock(c.end)}"><i class="trim trim-l" data-trim="l"></i><span class="clip-head"><b class="clip-no">${i+1}</b><span class="clip-name">${esc(c.label||'유지 구간')}</span> <small>${(c.end-c.start).toFixed(1)}초</small></span><canvas class="clip-film" aria-hidden="true"></canvas><canvas class="clip-wave" aria-hidden="true"></canvas><i class="trim trim-r" data-trim="r"></i></button>`).join('')||'<span class="muted">유지 구간을 추가하면 편집 타임라인이 생겨요.</span>';
+  $('timeline-track').innerHTML=project.state.clips.map((c,i)=>`<button class="timeline-clip ${i===selected?'active':''} ${typeof editMulti!=='undefined'&&editMulti.has(i)?'multi':''}" draggable="false" data-clip="${i}"  title="${esc(c.label)} · ${clock(c.start)}–${clock(c.end)}"><i class="trim trim-l" data-trim="l"></i><span class="clip-head"><b class="clip-no">${i+1}</b><span class="clip-name">${esc(c.label||'유지 구간')}</span> <small>${(c.end-c.start).toFixed(1)}초</small></span><i class="trim trim-r" data-trim="r"></i></button>`).join('')||'<span class="muted">유지 구간을 추가하면 편집 타임라인이 생겨요.</span>';
   $('undo').disabled=!history.length;$('redo').disabled=!future.length;drawClip();drawAnalysis();drawCaptions();drawPlanning();waveform();
   drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();if(typeof drawStoryboard==='function')drawStoryboard();
   $('srt-download').href=project?`/api/projects/${project.id}/captions.srt`:'#';
@@ -317,7 +317,11 @@ action('script-undo',async()=>{await saveQueue;const old=clone(project.state);pr
 let finalDownloading=null,scenePreviewEnd=null,requestedScriptPreview=null;
 async function saveFinalVideo(job){
  const f=job.result.files.find(f=>f.type==='video');if(!f)throw Error('완료된 MP4가 없습니다.');
- const a=document.createElement('a');a.href=`/api/exports/${job.id}/${encodeURIComponent(f.name)}`;a.download=f.name;document.body.append(a);a.click();a.remove();
+ const save=x=>{const a=document.createElement('a');a.href=`/api/exports/${job.id}/${encodeURIComponent(x.name)}`;a.download=x.name;document.body.append(a);a.click();a.remove();};
+ save(f);
+ // 자막(SRT)도 같이 받는다. 자막이 없으면(빈 파일) 영상만 받는다.
+ const srt=job.result.files.find(x=>x.type==='subtitle'&&!x.name.includes('표기')&&!x.name.includes('전체연결용'));
+ if(srt&&srt.size>10)setTimeout(()=>save(srt),900);else toast('자막이 아직 없어서 MP4만 받았어요.');
 }
 action('final-download',async()=>{requireProject();await saveQueue;if(latestExport?.status==='completed'&&latestExport.result.render_signature===project.render_signature){await saveFinalVideo(latestExport);return;}
  const response=await api('/projects/'+project.id+'/render',{method:'POST',body:JSON.stringify({revision:project.revision,mode:'full',preview:false,filename:'최종_편집본'})});finalDownloading=response.job_id;drawScript();await poll();toast('최종 MP4를 만들고 있습니다. 완료되면 다운로드를 시작합니다.');});

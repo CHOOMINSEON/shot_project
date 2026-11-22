@@ -187,3 +187,53 @@ def speed_up(path, speed, work, cancelled=lambda: False, quality='standard'):
                 '-movflags', '+faststart', sped], work, cancelled)
     sped.replace(path)
     return probe(path)
+
+
+def compose_layers(path, layers, work, fps, quality, preview, cancelled=lambda: False):
+    """편집본(path) 위에 레이어를 얹는다. 영상 레이어는 화면 전체를 덮고(줄 번호가 클수록 위), 소리는 섞는다.
+    layers: [{'source', 'metadata', 'start', 'end', 'at', 'track', 'volume', 'frame', 'mute'}] (편집본 기준 at)"""
+    path = Path(path)
+    info = probe(path)
+    total = info['duration']
+    width, height = (360, 640) if preview else (1080, 1920)
+    args, graph, video, audio, index = ['-protocol_whitelist', 'file,pipe', '-i', str(path)], [], '[0:v]', [], 0
+    if info.get('has_audio'):
+        audio.append('[0:a]')
+    for layer in layers:
+        meta = layer['metadata']
+        length = min(layer['end'] - layer['start'], total - layer['at'])
+        if length <= 1 / fps:
+            continue
+        index += 1
+        args += ['-ss', f"{layer['start']:.3f}", '-t', f'{length:.3f}', '-i', str(layer['source'])]
+        at = layer['at']
+        if meta.get('has_video', True):
+            frame = dict(layer.get('frame') or {})
+            if frame.get('mode') == 'blur':
+                frame['mode'] = 'fit'
+            graph.append(f'[{index}:v]{frame_filter(meta, frame, width, height, fps)},setpts=PTS-STARTPTS+{at:.3f}/TB[lv{index}]')
+            graph.append(f"{video}[lv{index}]overlay=eof_action=pass:enable='between(t,{at:.3f},{at + length:.3f})'[v{index}]")
+            video = f'[v{index}]'
+        if meta.get('has_audio') and not layer.get('mute'):
+            delay = int(round(at * 1000))
+            graph.append(f"[{index}:a]aresample=48000,asetpts=PTS-STARTPTS,adelay={delay}:all=1,volume={float(layer.get('volume', 1)):.3f}[la{index}]")
+            audio.append(f'[la{index}]')
+    if not index:
+        return info
+    maps = []
+    if video != '[0:v]':
+        maps += ['-map', video, '-c:v', 'libx264', '-preset', 'ultrafast' if preview else 'fast',
+                 '-crf', '25' if preview else ('18' if quality == 'high' else '21'), '-pix_fmt', 'yuv420p',
+                 '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
+    else:
+        maps += ['-map', '0:v:0', '-c:v', 'copy']
+    if len(audio) > 1:
+        graph.append(''.join(audio) + f'amix=inputs={len(audio)}:duration=first:dropout_transition=0:normalize=0[aout]')
+        maps += ['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
+    elif audio:
+        maps += ['-map', '0:a:0', '-c:a', 'copy']
+    out = path.with_name(path.stem + '.layers.mp4')
+    run_ffmpeg(args + (['-filter_complex', ';'.join(graph)] if graph else []) + maps +
+               ['-t', f'{total:.3f}', '-movflags', '+faststart', out], work, cancelled)
+    out.replace(path)
+    return probe(path)

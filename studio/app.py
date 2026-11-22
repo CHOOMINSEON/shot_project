@@ -303,6 +303,7 @@ def delete_asset(ident: str, asset_id: str):
             for key in ['guided', 'guided_brief', 'script_edit', 'script_brief']:
                 state.pop(key, None)
         state['protections'] = [p for p in state.get('protections', []) if p.get('asset_id') != asset_id]
+        state['layers'] = [l for l in state.get('layers', []) if l.get('asset_id') != asset_id]
         conn.execute('DELETE FROM chunks WHERE asset_id=?', (asset_id,))
         conn.execute('DELETE FROM assets WHERE id=?', (asset_id,))
         conn.execute('UPDATE projects SET state=?,revision=revision+1,updated=? WHERE id=?',
