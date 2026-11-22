@@ -54,7 +54,7 @@ track().addEventListener('click',e=>{
   if(tool==='blade'&&at>c.start+frame()/2&&at<c.end-frame()/2){hideCut();
     mutate(s=>{const old=s.clips[i];s.clips.splice(i,1,{...old,end:at},{...clone(old),id:uuid(),start:at});})
       .then(()=>{selectClip(i+1,false);}).catch(error=>toast(error.message));return;}
-  selectClip(i,false);setSource('/api/assets/'+c.asset_id+'/video',at,false);
+  $('player').pause();selectClip(i,false);setSource('/api/assets/'+c.asset_id+'/video',at,false);
 },true);
 
 // 구간 끌어서 순서 변경
@@ -165,7 +165,7 @@ zoomBox.addEventListener('click',e=>{const b=e.target.closest('[data-zoom]');if(
   setZoom(k==='fit'?1:zoom*(k==='in'?1.6:1/1.6),k==='fit'?undefined:(wrap.getBoundingClientRect().left+((playheadX()??wrap.scrollLeft+wrap.clientWidth/2)-wrap.scrollLeft)));});
 $('tl-zoom').addEventListener('input',e=>setZoom(fromSlider(+e.target.value)));
 wrap.addEventListener('wheel',e=>{if(!(e.ctrlKey||e.metaKey))return;e.preventDefault();setZoom(zoom*Math.pow(1.0015,-e.deltaY),e.clientX);},{passive:false});
-wrap.addEventListener('scroll',()=>requestAnimationFrame(()=>{drawRuler();paint();}));
+wrap.addEventListener('scroll',()=>requestAnimationFrame(()=>{drawRuler();paint();drawPlayhead();}));
 
 // 레이어 줄 그리기
 function renderLayers(){
@@ -193,16 +193,34 @@ function layout(){
 window.layoutTimeline=layout;
 // 눈금자(보이는 범위만)
 function drawRuler(){
-  if(!project)return;const p=pps(),steps=[.1,.2,.5,1,2,5,10,15,30,60,120,300,600,1200];const step=steps.find(s=>s*p>=70)||1800;
+  if(!project)return;const p=pps(),steps=[.1,.2,.5,1,2,5,10,15,30,60,120,300,600,1200];const step=steps.find(s=>s*p>=80)||1800;
+  const sub=[10,5,2].find(n=>step*p/n>=7)||1,minor=step/sub;
   const a=Math.floor((wrap.scrollLeft/p)/step)*step,b=(wrap.scrollLeft+wrap.clientWidth)/p;let html='';
-  for(let t=a;t<=b+step;t+=step){const x=t*p;html+=`<span style="left:${x}px">${step<1?clock(t,true).slice(0,-2):clock(t)}</span>`;}
+  for(let t=a;t<=b+step;t+=step){const x=t*p;html+=`<span class="mj" style="left:${x}px">${step<1?clock(t,true).slice(0,-2):clock(t)}</span>`;
+    for(let k=1;k<sub;k++)html+=`<i class="${sub===10&&k===5?'md':''}" style="left:${x+k*minor*p}px"></i>`;}
   ruler.innerHTML=html;
 }
-ruler.addEventListener('click',e=>seekTo(timeAt(e.clientX)));
+// 재생헤드: 눈금자·빈 곳을 누르면 그 화면에서 멈추고, 누른 채 끌면 따라가며 보여준다(스페이스바로 재생).
 function seekTo(t){
+  const p=$('player');p.pause();
+  if(rendered){p.currentTime=Math.min(t,(p.duration||t+1)-.01);drawPlayhead();return;}
   let off=0;const clips=project?.state.clips||[];
-  for(let i=0;i<clips.length;i++){const c=clips[i],len=c.end-c.start;if(t<off+len||i===clips.length-1){selectClip(i,false);setSource('/api/assets/'+c.asset_id+'/video',snap(c.start+Math.min(len,Math.max(0,t-off))),false);return;}off+=len;}
+  for(let i=0;i<clips.length;i++){const c=clips[i],len=c.end-c.start;if(t<off+len||i===clips.length-1){
+    const at=snap(c.start+Math.min(len-frame()/2,Math.max(0,t-off)));
+    if(i!==selected||mode!=='edited')selectClip(i,false);
+    setSource('/api/assets/'+c.asset_id+'/video',at,false);drawPlayhead();return;}off+=len;}
 }
+let scrub=null;
+function startScrub(e){if(e.button!==0||!project?.state.clips.length)return;e.preventDefault();e.stopPropagation();hideCut();scrub=true;document.body.classList.add('scrubbing');seekTo(timeAt(e.clientX));}
+const handle=document.createElement('b');handle.className='ph-handle';lineHead.appendChild(handle);
+handle.addEventListener('pointerdown',startScrub);ruler.addEventListener('pointerdown',startScrub);
+// 클립이 아닌 빈 곳(기본 줄·레이어 줄 바탕)
+content.addEventListener('pointerdown',e=>{if(scrub||e.target.closest('[data-clip],.layer-clip,.trim,.tl-ruler,.ph-handle'))return;
+  if(!e.target.closest('.tl-row,.tl-layers,#timeline-track')&&e.target!==content)return;startScrub(e);});
+window.addEventListener('pointermove',e=>{if(!scrub)return;const r=wrap.getBoundingClientRect();
+  if(e.clientX>r.right-20)wrap.scrollLeft+=12;else if(e.clientX<r.left+20)wrap.scrollLeft-=12;
+  seekTo(timeAt(e.clientX));});
+window.addEventListener('pointerup',()=>{if(!scrub)return;scrub=null;document.body.classList.remove('scrubbing');});
 
 // 썸네일 띠·파형: 화면에 보이는 부분만 줄마다 캔버스 하나에 그린다(크게 확대해도 가볍게)
 const strips={},peaks={};
@@ -324,8 +342,13 @@ function resolvePending(){
 // 재생 위치 표시선(모든 줄을 가로지름)
 function playheadX(){const h=playhead();if(!h)return null;let off=0;for(let i=0;i<h.index;i++){const c=project.state.clips[i];off+=c.end-c.start;}
   return (off+h.time-project.state.clips[h.index].start)*pps();}
-function drawPlayhead(){const el=lineHead,x=playheadX();if(x===null){el.classList.add('hidden');return;}el.style.left=x+'px';el.classList.remove('hidden');}
+function drawPlayhead(){const el=lineHead,x=playheadX();if(x===null){el.classList.add('hidden');return;}el.style.left=x+'px';el.style.top=wrap.scrollTop+'px';el.style.height=wrap.clientHeight+'px';el.classList.remove('hidden');}
 $('player').addEventListener('timeupdate',drawPlayhead);$('player').addEventListener('seeked',drawPlayhead);
+// 재생 중에는 매 프레임 선을 옮기고, 화면 밖으로 나가면 따라 스크롤한다.
+let phLoop=0;function phTick(){const p=$('player');drawPlayhead();
+  const x=playheadX();if(x!==null&&!scrub&&(x>wrap.scrollLeft+wrap.clientWidth-30||x<wrap.scrollLeft))wrap.scrollLeft=Math.max(0,x-40);
+  phLoop=p.paused?0:requestAnimationFrame(phTick);}
+$('player').addEventListener('play',()=>{if(!phLoop)phLoop=requestAnimationFrame(phTick);});
 
 // 단축키(입력창에 글자를 쓰는 중에는 동작하지 않음)
 document.addEventListener('keydown',e=>{
@@ -345,7 +368,7 @@ document.addEventListener('keydown',e=>{
   if(key==='q'||key==='Q')return run(trimHead);
   if(key==='w'||key==='W')return run(trimTail);
   if(key==='Delete'||key==='Backspace')return run(focusLayer&&selectedLayer?removeLayer:removeSelected);
-  if(key===' ')return run(()=>p.paused?p.play():p.pause());
+  if(key===' ')return run(()=>{if(!p.paused)return p.pause();if(!p.src&&project.state.clips.length)seekTo(0);return p.play();});
   if(key==='ArrowLeft'||key==='ArrowRight')return run(()=>{p.pause();p.currentTime=Math.max(0,p.currentTime+(key==='ArrowLeft'?-1:1)*(e.shiftKey?1:frame()));});
   if(key==='['||key===']')return run(()=>{const n=selected+(key==='['?-1:1);if(project.state.clips[n])selectClip(n,false);});
 });
