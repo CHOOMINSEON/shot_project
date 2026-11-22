@@ -11,6 +11,9 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+MAX_LAYER_TRACKS = 5   # 기본 줄 1개 + 레이어 5줄 = 6줄
+
+
 def validate_state(state, assets):
     if not isinstance(state, dict):
         raise ValueError('편집 정보 형식이 올바르지 않습니다.')
@@ -53,6 +56,34 @@ def validate_state(state, assets):
             value = frame.get(key, default)
             if not finite(value) or not low <= value <= high:
                 raise ValueError('크롭 위치·확대율을 허용 범위 안에서 설정해 주세요.')
+    layers = state.get('layers', [])
+    if not isinstance(layers, list) or len(layers) > 500:
+        raise ValueError('레이어 구간은 최대 500개까지 지원합니다.')
+    seen_layers = set()
+    for layer in layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get('id'), str) or layer['id'] in seen_layers:
+            raise ValueError('레이어 구간 ID가 중복되었거나 올바르지 않습니다.')
+        seen_layers.add(layer['id'])
+        asset = assets.get(layer.get('asset_id'))
+        if not asset or asset['status'] != 'ready':
+            raise ValueError('레이어에는 검사가 완료된 원본만 놓을 수 있습니다.')
+        track = layer.get('track')
+        if not isinstance(track, int) or isinstance(track, bool) or not 1 <= track <= MAX_LAYER_TRACKS:
+            raise ValueError('레이어 줄 번호가 올바르지 않습니다.')
+        start, end, at = layer.get('start'), layer.get('end'), layer.get('at')
+        if not finite(start) or not finite(end) or not finite(at) or start < 0 or end <= start or at < 0 or at > 6 * 3600 \
+                or end > asset['metadata']['duration'] + .001:
+            raise ValueError('레이어 구간의 시간을 원본 범위 안에서 설정해 주세요.')
+        layer['start'] = round(start * fps) / fps
+        layer['end'] = min(round(end * fps) / fps, math.floor(asset['metadata']['duration'] * fps) / fps)
+        layer['at'] = round(at * fps) / fps
+        if layer['end'] <= layer['start']:
+            raise ValueError('레이어 구간은 출력 프레임 하나 이상이어야 합니다.')
+        volume = layer.get('volume', 1)
+        if not finite(volume) or not 0 <= volume <= 2:
+            raise ValueError('레이어 소리 크기는 0~2 사이로 설정해 주세요.')
+        if (layer.get('frame') or {}).get('mode', 'fit') not in ['fit', 'fill', 'blur']:
+            raise ValueError('지원하지 않는 화면 설정입니다.')
     for protection in state.get('protections', []):
         asset = assets.get(protection.get('asset_id'))
         start, end = protection.get('start'), protection.get('end')
@@ -78,6 +109,8 @@ def signature(state):
 
 def render_signature(state):
     content = [state.get('clips', []), state.get('fps', 30), state.get('quality', 'standard')]
+    if state.get('layers'):
+        content.append(state['layers'])
     if output_speed(state) != 1:
         content.append(output_speed(state))   # 배속이 바뀌면 이전 출력은 재사용하지 않는다
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
@@ -353,3 +386,17 @@ def product_candidates(words, names, length):
         c['end'] = candidates[i + 1]['start'] if i + 1 < len(candidates) else length
         c['text'] = ''.join(w['text'] for w in words if c['start'] <= w['start'] < c['end']).strip()
     return candidates
+
+
+def layers_in(state, start, end):
+    """[start, end) 편집본 구간에 걸치는 레이어를 그 구간 기준 시간으로 바꿔 돌려준다(아래 줄부터)."""
+    out = []
+    for layer in sorted(state.get('layers', []), key=lambda l: l['track']):
+        length = layer['end'] - layer['start']
+        a, b = layer['at'], layer['at'] + length
+        if b <= start or a >= end:
+            continue
+        cut_head = max(0., start - a)
+        out.append({**layer, 'start': layer['start'] + cut_head, 'at': max(a, start) - start,
+                    'end': layer['start'] + min(length, end - a)})
+    return out

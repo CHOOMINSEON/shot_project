@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
-from .media import Cancelled, probe, render_piece, run_ffmpeg, speed_up
+from .media import Cancelled, compose_layers, probe, render_piece, run_ffmpeg, speed_up
 from .settings import ASR_BEAM, ASR_THREADS, DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
 STOP = threading.Event()
@@ -252,6 +252,13 @@ def render(ident, payload):
         rendered_info = probe(output)
         if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
             raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')
+        layered = timeline.layers_in(state, group_start, elapsed)
+        if layered:
+            update(ident, payload.get('progress_offset', 0) + payload.get('progress_scale', 1) * .89, f'레이어 {len(layered)}개 합치는 중')
+            for layer in layered:
+                source = db.get_asset(layer['asset_id'])
+                layer['source'], layer['metadata'] = asset_path(source['id']), source['metadata']
+            compose_layers(output, layered, work, state.get('fps', 30), state.get('quality', 'standard'), preview, lambda: is_cancelled(ident))
         if speed != 1:
             update(ident, payload.get('progress_offset', 0) + payload.get('progress_scale', 1) * .9, f'{speed:g}배속 적용 중')
             speed_up(output, speed, work, lambda: is_cancelled(ident), state.get('quality', 'standard'))
