@@ -45,6 +45,8 @@ keys.innerHTML='<b>단축키<span id="app-version"></span></b><dl>'+[['Space','�
 left.appendChild(keys);
 const old=[...main.children];
 main.append(left,center,right);
+// 타임라인은 가운데와 오른쪽 아래를 가로질러 넓게
+if(timeline){timeline.classList.add('studio-bottom');main.appendChild(timeline);}
 old.forEach(e=>{if(e!==left&&e!==center&&e!==right&&!e.children.length)e.remove();else if(e.classList?.contains('workspace'))e.hidden=true;});
 main.classList.add('studio-grid');document.body.classList.add('studio');
 // 작업실 접힘 상태는 이 브라우저에 기억한다(채팅 공간을 넓히고 싶을 때 접기)

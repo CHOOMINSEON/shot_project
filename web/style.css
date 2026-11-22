@@ -264,3 +264,11 @@ section.timeline.drag::after{content:'여기에 놓으면 영상·폴더를 바�
 @media(max-height:950px){.studio .upload-zone{padding:10px 8px;margin:10px 0 8px}.studio .upload-zone .upload-icon{width:32px;height:32px;font-size:20px}.studio .library .storage{margin-top:8px}.studio-left{gap:8px}}
 .shortcut-card>b{display:flex;justify-content:space-between;align-items:baseline}
 #app-version{font-size:9px;font-weight:400;color:var(--muted)}
+/* 7차: 타임라인을 가운데+오른쪽 아래로 넓게 */
+main.studio-grid{grid-template-rows:minmax(0,1fr) auto}
+.studio-left{grid-column:1;grid-row:1/3}
+.studio-center{grid-column:2;grid-row:1}
+.studio-right{grid-column:3;grid-row:1}
+.studio .timeline.studio-bottom{grid-column:2/4;grid-row:2;min-width:0}
+@media(max-width:980px){.studio-left,.studio-center,.studio-right,.studio .timeline.studio-bottom{grid-column:auto;grid-row:auto}}
+#storyboard-text{min-height:200px}
