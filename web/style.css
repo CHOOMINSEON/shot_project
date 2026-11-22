@@ -272,3 +272,6 @@ main.studio-grid{grid-template-rows:minmax(0,1fr) auto}
 .studio .timeline.studio-bottom{grid-column:2/4;grid-row:2;min-width:0}
 @media(max-width:980px){.studio-left,.studio-center,.studio-right,.studio .timeline.studio-bottom{grid-column:auto;grid-row:auto}}
 #storyboard-text{min-height:200px}
+.studio .timeline-clip.moving{opacity:.75;z-index:6;transition:none;box-shadow:0 6px 18px #000a}
+body.clip-moving,body.clip-moving *{cursor:grabbing!important;user-select:none}
+.studio .timeline-clip.drop-before{box-shadow:-4px 0 0 #ffd84d}.studio .timeline-clip.drop-after{box-shadow:4px 0 0 #ffd84d}
