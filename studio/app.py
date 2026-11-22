@@ -142,6 +142,14 @@ def logout(request: Request):
     return response
 
 
+def _version():
+    try:
+        from . import _build
+        return _build.SHA[:8]
+    except Exception:
+        return 'dev'
+
+
 @app.get('/api/config')
 def config(request: Request):
     usage = shutil.disk_usage(DATA)
@@ -149,7 +157,7 @@ def config(request: Request):
     ready = setup.snapshot()['status'] == 'ready' if setup else (MODEL_DIR / 'model.bin').exists()
     return {'max_file_bytes': MAX_FILE_BYTES, 'max_input_seconds': MAX_INPUT_SECONDS,
             'max_output_seconds': MAX_OUTPUT_SECONDS, 'chunk_bytes': CHUNK_BYTES,
-            'model_ready': ready, 'model_name': MODEL_NAME, 'device': worker.MODEL_DEVICE, 'free_bytes': usage.free, 'desktop': setup is not None,
+            'model_ready': ready, 'model_name': MODEL_NAME, 'version': _version(), 'device': worker.MODEL_DEVICE, 'free_bytes': usage.free, 'desktop': setup is not None,
             'privacy': '영상과 오디오는 이 앱의 서버에서 처리합니다. 외부 음성 인식 API에 전송하지 않습니다.'}
 
 
