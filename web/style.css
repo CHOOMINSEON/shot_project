@@ -190,3 +190,9 @@ main.studio-grid{grid-template-columns:250px minmax(0,1fr) 380px;gap:10px;paddin
 .transport-actions{display:flex;gap:6px;flex:none;margin-left:6px}
 .transport-actions button{font-size:12px;padding:7px 12px;white-space:nowrap}
 .transport-actions button.hidden{display:none}
+/* 앱 이름: 이요링 스튜디오 (소제목 없음) */
+.brand-name{font-size:20px;font-weight:700;letter-spacing:-.02em}
+/* 타임라인이 화면 아래로 잘리지 않게 가운데 칸 안에서 줄어들고 스크롤 */
+.studio-center{overflow:hidden}
+.studio .timeline{flex:0 1 auto;min-height:0}
+.studio .viewer{min-height:260px}
