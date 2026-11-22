@@ -12,7 +12,7 @@ library_box.innerHTML='<summary>내 작업실 · 영상 불러오기</summary>';
 if(library){library_box.appendChild(library);left.appendChild(library_box);}
 if(chat)left.appendChild(chat);
 [toolbar,viewer,timeline].forEach(e=>e&&center.appendChild(e));
-const rightHead=document.createElement('div');rightHead.className='rail-head';rightHead.innerHTML='<h2>편집 지침</h2><p class="muted">지침을 쓰고 ‘자동 편집 시작’을 누르거나, 왼쪽 채팅으로 바로 고쳐요.</p>';
+const rightHead=document.createElement('div');rightHead.className='rail-head';rightHead.innerHTML='<h2>편집 지침</h2>';
 right.appendChild(rightHead);
 // 작업 공간에 남은 나머지(지침 자동 편집, 대본 편집, 무음 편집, 작업 진행, 기획판, 세부 편집)는 원래 순서대로 오른쪽으로
 const workspace=q('section.workspace'),grid=q('.editor-grid');

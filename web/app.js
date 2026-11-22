@@ -47,7 +47,7 @@ function draw(){
   selected=Math.max(0,Math.min(selected,project.state.clips.length-1));
   if(!project.assets.some(a=>a.id===activeAsset))activeAsset=project.assets[0]?.id;
   $('project-name').value=project.name;$('workspace-name').textContent=project.name;
-  $('save-status').textContent=`✓ 저장됨 · 편집 버전 ${project.revision}`;$('asset-count').textContent=project.assets.length+'개';
+  $('save-status').textContent=`✓ 저장됨 · 편집 버전 ${project.revision}`;$('asset-count').textContent=project.assets.length+'개';$('loaded-count').textContent=project.assets.length?`불러온 원본 ${project.assets.length}개 · 더 놓으면 추가돼요`:'파일당 10GB · 최대 2시간';
   $('assets').innerHTML=project.assets.map(a=>`<div class="asset ${a.id===activeAsset?'active':''}" data-asset="${a.id}">${a.status==='ready'?`<img src="/api/assets/${a.id}/thumbnail" alt="">`:'<span>◷</span>'}<div><b title="${esc(a.name)}">${esc(a.name)}</b><small>${bytes(a.size)} · ${a.status==='ready'?clock(a.metadata.duration):({'uploading':'업로드 대기','checking':'영상 검사 중','invalid':'파일 검사 실패'}[a.status]||a.status)}</small></div>${['uploading','invalid'].includes(a.status)?`<button data-discard="${a.id}" class="danger">정리</button>`:`<span class="asset-actions"><button data-rename-asset="${a.id}" class="ghost" title="이름 수정">수정</button><button data-delete-asset="${a.id}" class="danger" title="이 영상 삭제">삭제</button></span>`}</div>`).join('')||'<div class="empty-small">원본을 올리면 여기에 모여요.</div>';
   $('analysis-asset').innerHTML=project.assets.filter(a=>a.status==='ready').map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');$('analysis-asset').value=activeAsset||'';
   $('vocabulary').value=project.state.vocabulary||'';$('reference-script').value=project.state.reference_script||'';$('fps').value=project.state.fps||30;$('quality').value=project.state.quality||'standard';
@@ -170,7 +170,7 @@ async function poll(){if(!project||$('login-dialog').open)return;const id=projec
   drawQuick();drawScript();if(typeof drawGuided==='function')drawGuided();
 }
 async function linkLocal(paths){paths=paths.map(p=>p.trim().replace(/^"|"$/g,'')).filter(Boolean);if(!paths.length)return;if(!project){const name=(paths[0].split(/[\\/]/).pop()||'새 프로젝트').replace(/\.[^.]+$/,'').slice(0,60);const p=await api('/projects',{method:'POST',body:JSON.stringify({name})});await loadProjects(p.id);}await api('/projects/'+project.id+'/local-files',{method:'POST',body:JSON.stringify({paths})});toast(paths.length+'개 파일을 연결했어요. 영상 정보를 확인하고 있어요.');project=await api('/projects/'+project.id);draw();await poll();}
-let lbPath='',lbPicked=new Set();
+let lbPath='',lbPicked=new Set(),lbFiles=[];
 const lbEsc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function lbOpen(path){const r=await api('/local-browse?path='+encodeURIComponent(path||''));lbPath=r.path;lbPicked=new Set();$('lb-path').textContent=r.path||'내 PC';$('lb-up').disabled=!r.path;$('lb-up').dataset.to=r.parent||'';
  const row=(d,icon)=>`<button class="lb-item" data-dir="${lbEsc(d.path)}">${icon}<span>${lbEsc(d.name)}</span></button>`;
@@ -178,11 +178,12 @@ async function lbOpen(path){const r=await api('/local-browse?path='+encodeURICom
  h+=r.dirs.map(d=>row(d,'📁')).join('');
  h+=r.files.map(f=>`<label class="lb-item"><input type="checkbox" data-file="${lbEsc(f.path)}"><span>🎬 ${lbEsc(f.name)}</span><small>${(f.size/1048576).toFixed(0)}MB</small></label>`).join('');
  if(r.path&&!r.dirs.length&&!r.files.length)h='<p class="muted">이 폴더에는 영상·오디오 파일이 없어요.</p>';
+ if(r.files.length)h=`<button class="primary full" data-link-all="1">📁 이 폴더 영상 ${r.files.length}개 모두 연결</button>`+h;lbFiles=r.files.map(f=>f.path);
  $('lb-list').innerHTML=h;$('lb-link').disabled=true;$('lb-link').textContent='선택한 영상 연결';}
 bind('local-pick','click',async()=>{$('local-browser').classList.remove('hidden');await lbOpen('');});
 bind('lb-close','click',()=>$('local-browser').classList.add('hidden'));
 bind('lb-up','click',()=>lbOpen($('lb-up').dataset.to));
-bind('lb-list','click',async e=>{const d=e.target.closest('[data-dir]');if(d){await lbOpen(d.dataset.dir);}});
+bind('lb-list','click',async e=>{if(e.target.closest('[data-link-all]')){await linkLocal(lbFiles);$('local-browser').classList.add('hidden');return;}const d=e.target.closest('[data-dir]');if(d){await lbOpen(d.dataset.dir);}});
 bind('lb-list','change',e=>{const f=e.target.dataset.file;if(!f)return;e.target.checked?lbPicked.add(f):lbPicked.delete(f);$('lb-link').disabled=!lbPicked.size;$('lb-link').textContent=lbPicked.size?`선택한 영상 ${lbPicked.size}개 연결`:'선택한 영상 연결';});
 bind('lb-link','click',async()=>{await linkLocal([...lbPicked]);$('local-browser').classList.add('hidden');});
 bind('local-add','click',async()=>{await linkLocal($('local-paths').value.split('\n'));$('local-paths').value='';});
@@ -220,7 +221,39 @@ async function uploadFiles(files){
   }}finally{uploadAbort=null;project=await api('/projects/'+project.id);draw();$('upload-progress').classList.add('hidden');await poll();}
 }
 bind('dubbing-upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});
-bind('upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});for(const event of ['dragenter','dragover'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.add('drag');});for(const event of ['dragleave','drop'])$('dropzone').addEventListener(event,e=>{e.preventDefault();$('dropzone').classList.remove('drag');if(event==='drop')uploadFiles([...e.dataTransfer.files]).catch(error=>toast(error.message));});
+bind('upload','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadFiles(files);});
+// 폴더를 통째로 끌어다 놓거나 고르면 안에 든 영상·오디오만(하위 폴더 포함) 이름순으로 불러온다.
+const MEDIA_EXT=/\.(mp4|mov|mkv|m4v|webm|avi|mts|mp3|m4a|wav|aac|flac)$/i;
+const isMedia=f=>MEDIA_EXT.test(f.name)||/^(video|audio)\//.test(f.type||'');
+const byName=(a,b)=>(a.webkitRelativePath||a.name).localeCompare(b.webkitRelativePath||b.name,'ko',{numeric:true});
+async function readEntry(entry,out){
+  if(entry.isFile){out.push(await new Promise((ok,no)=>entry.file(ok,no)));return;}
+  if(!entry.isDirectory||entry.name.startsWith('.'))return;
+  const reader=entry.createReader();
+  for(;;){const batch=await new Promise((ok,no)=>reader.readEntries(ok,no));if(!batch.length)break;for(const e of batch)await readEntry(e,out);}
+}
+async function droppedFiles(dt){
+  const entries=[...(dt.items||[])].map(i=>i.kind==='file'&&i.webkitGetAsEntry?.()).filter(Boolean);
+  if(!entries.length)return [...dt.files];
+  const out=[];for(const e of entries)await readEntry(e,out);return out;
+}
+async function uploadMedia(files,fromFolder){
+  const media=files.filter(isMedia).sort(byName);
+  if(!media.length)throw Error(fromFolder?'이 폴더에는 영상·오디오 파일이 없어요.':'영상·오디오 파일만 불러올 수 있어요.');
+  if(media.length>1)toast(`영상 ${media.length}개를 불러올게요.`);
+  await uploadFiles(media);
+}
+bind('upload-folder','change',async e=>{const files=[...e.target.files];e.target.value='';await uploadMedia(files,true);});
+function dropTarget(el){if(!el)return;
+  const has=e=>[...(e.dataTransfer?.types||[])].includes('Files');
+  el.addEventListener('dragover',e=>{if(!has(e))return;e.preventDefault();e.dataTransfer.dropEffect='copy';el.classList.add('drag');});
+  el.addEventListener('dragleave',e=>{if(!el.contains(e.relatedTarget))el.classList.remove('drag');});
+  el.addEventListener('drop',async e=>{if(!has(e))return;e.preventDefault();el.classList.remove('drag');
+    try{const folder=[...(e.dataTransfer.items||[])].some(i=>i.webkitGetAsEntry?.()?.isDirectory);await uploadMedia(await droppedFiles(e.dataTransfer),folder);}catch(error){toast(error.message);}});
+}
+dropTarget($('dropzone'));dropTarget(document.querySelector('section.viewer'));
+// 다른 곳에 잘못 놓아도 브라우저가 영상 파일을 열어 버리지 않게 막는다.
+for(const ev of ['dragover','drop'])window.addEventListener(ev,e=>{if([...(e.dataTransfer?.types||[])].includes('Files'))e.preventDefault();});
 bind('login-form','submit',async e=>{e.preventDefault();try{await api('/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('login-dialog').close();await init();}catch(error){$('login-error').textContent=error.message;}});$('login-dialog').addEventListener('cancel',e=>e.preventDefault());action('logout',async()=>{await api('/logout',{method:'POST'});$('player').pause();location.reload();});
 function modelInfo(){
   $('model-status').textContent=config.model_ready?`한국어 Whisper ${config.model_name} 준비됨 · 제품명은 등록하고 원음을 검수해 주세요.`:(config.desktop?'자막 모델을 준비하고 있어요. 상단에서 진행 상황을 확인해 주세요.':'자막 모델 설치 전이에요. 위의 무음 자동 편집은 바로 사용할 수 있어요.');
