@@ -273,7 +273,7 @@ async function refreshDesktop(){
   config.model_ready=status.status==='ready';modelInfo();
 }
 action('desktop-setup-retry',async()=>{await api('/desktop/retry',{method:'POST'});await refreshDesktop();});
-async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();$('local-link').classList.toggle('hidden',!config.desktop);clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
+async function init(){try{config=await api('/config');$('storage').textContent=bytes(config.free_bytes);modelInfo();$('local-link').classList.toggle('hidden',!config.desktop);$('logout').hidden=Boolean(config.desktop);clearInterval(desktopTimer);if(config.desktop){await refreshDesktop();desktopTimer=setInterval(()=>refreshDesktop().catch(()=>{}),2000);}await loadProjects();clearInterval(pollTimer);pollTimer=setInterval(()=>poll().catch(e=>console.warn(e.message)),2000);}catch(error){if(!$('login-dialog').open)toast(error.message);}}
 window.addEventListener('resize',waveform);window.addEventListener('DOMContentLoaded',init);
 
 const exampleScript=`아니 제가 CU 다섯 곳이나 돌아서 겨우 3개 구했거든요?
