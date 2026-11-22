@@ -52,7 +52,28 @@ def update(ident, value, message):
 
 MODEL_DEVICE = 'cpu'
 # 한국어 철자·띄어쓰기 기준을 잡아 주는 짧은 문맥(인식 결과에 끼워 넣지 않고 모델의 참고용으로만 사용).
-KOREAN_CONTEXT = '편의점 신상 라면 아이스크림 간식 먹방 리뷰입니다. 맛있어요, 쫄깃해요, 바삭해요, 가격은 이천오백 원이에요.'
+KOREAN_CONTEXT = ('편의점 신상 라면 아이스크림 간식 먹방 리뷰입니다. CU, GS25, 세븐일레븐, 이마트24. '
+                  '크림브륄레, 캐러멜, 필링, 초콜릿, 단짠단짠. 맛있어요, 쫄깃해요, 바삭해요, 가격은 이천오백 원이에요.')
+MODEL_RANK = {'tiny': 0, 'base': 1, 'small': 2, 'medium': 3, 'large-v3': 4}
+
+
+def transcript_vocabulary(state):
+    """인식 단어장: 사용자가 적은 '제품명 · 브랜드 · 자주 쓰는 표현' + 제품 근거로 고른 제품 정보."""
+    items = re.split(r'[,，\n]', state.get('vocabulary', '') or '')
+    items += [' '.join(x for x in [p.get('name', ''), p.get('brand', ''), p.get('variant', '')] if x)
+              for p in state.get('scene_products', []) or []]
+    return ', '.join(dict.fromkeys(i.strip() for i in items if i.strip()))[:1000]
+
+
+def needs_transcript(asset, model, vocabulary, ready=True):
+    """아직 인식 전이거나, 더 정확한 모델·바뀐 단어장으로 다시 인식할 수 있으면 True."""
+    analysis = asset['analysis']
+    if not analysis.get('transcribed'):
+        return True
+    if not ready:
+        return False
+    older = MODEL_RANK.get(analysis.get('model') or 'base', 1) < MODEL_RANK.get(model, 3)
+    return older or (analysis.get('vocabulary', '') or '') != vocabulary
 
 
 def _open_model(factory, directory):
@@ -179,6 +200,8 @@ def analyze(ident, payload):
     data['candidates'] = timeline.cut_candidates(data['speech'], length)
     data['products'] = timeline.product_candidates(data['words'], payload.get('names', []), length) if model else []
     data['transcribed'] = bool(model)
+    if model:
+        data['vocabulary'] = payload.get('vocabulary', '') or ''
     # A VAD-only re-run must not erase a previously completed transcript.
     if not model:
         for key in ['words', 'products', 'transcribed', 'model']:
@@ -399,12 +422,13 @@ def edit_script(ident, payload):
     if not result.get('applied'):
         with db.connection() as conn:
             raw=conn.execute('SELECT state FROM projects WHERE id=?',(job['project_id'],)).fetchone()
-        product_info=json.loads(raw['state']).get('scene_products',[])
-        vocabulary=', '.join(' '.join([p.get('name',''),p.get('brand',''),p.get('variant','')]) for p in product_info)[:1000]
+        project_state=json.loads(raw['state'])
+        product_info=project_state.get('scene_products',[]) or []
+        vocabulary=transcript_vocabulary(project_state)
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset=db.get_asset(asset_id)
-            if not asset['analysis'].get('transcribed'):
+            if needs_transcript(asset,payload['model'],vocabulary,payload.get('speech_ready',False)):
                 update(ident,0,f'{index+1}/{len(payload["speech_ids"])} · 실제 대사 인식: {asset["name"]}')
                 analyze(ident,{'asset_id':asset_id,'transcribe':True,'model':payload['model'],
                                'script_asset_checkpoint':True,'vocabulary':vocabulary,'names':[p['name'] for p in product_info]})
@@ -510,14 +534,15 @@ def guided_edit(ident, payload):
     if not result.get('applied'):
         with db.connection() as conn:
             raw = conn.execute('SELECT state FROM projects WHERE id=?', (job['project_id'],)).fetchone()
-        product_info = json.loads(raw['state']).get('scene_products', [])
-        vocabulary = ', '.join(' '.join([p.get('name', ''), p.get('brand', ''), p.get('variant', '')]) for p in product_info)[:1000]
+        project_state = json.loads(raw['state'])
+        product_info = project_state.get('scene_products', []) or []
+        vocabulary = transcript_vocabulary(project_state)
         STAGE_CLOCK.pop(ident, None)
         stage_log(ident, '자동 편집 시작')
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset = db.get_asset(asset_id)
-            if not asset['analysis'].get('transcribed'):
+            if needs_transcript(asset, payload['model'], vocabulary, payload.get('speech_ready', False)):
                 update(ident, 0, f'{index + 1}/{len(payload["speech_ids"])} · 실제 발화 인식: {asset["name"]}')
                 analyze(ident, {'asset_id': asset_id, 'transcribe': True, 'model': payload['model'], 'script_asset_checkpoint': True,
                                 'vocabulary': vocabulary, 'names': [p['name'] for p in product_info]})

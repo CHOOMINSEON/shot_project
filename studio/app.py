@@ -806,7 +806,7 @@ def edit_script(ident: str, body: ScriptEdit, request: Request):
         if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind IN ('auto_cut','script_edit','guided_edit') AND status IN ('queued','running')",(ident,)).fetchone():
             raise HTTPException(409,'자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
         job_id=db.uid()
-        payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in available], 'model':MODEL_NAME, 'speech_skipped':len(chosen)-len(available)}
+        payload={**body.model_dump(),'asset_ids':[a['id'] for a in assets],'speech_ids':[a['id'] for a in available], 'model':MODEL_NAME, 'speech_ready':speech_ready, 'speech_skipped':len(chosen)-len(available)}
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
                      (job_id,ident,'script_edit','queued',json.dumps(payload,ensure_ascii=False),time.time(),time.time()))
     return {'job_id':job_id}
@@ -858,7 +858,7 @@ def guided_edit(ident: str, body: GuidedEdit, request: Request):
             raise HTTPException(409, '자동 편집이 진행 중이에요. 완료 후 실행해 주세요.')
         job_id = db.uid()
         payload = {**body.model_dump(), 'guideline': guideline, 'audio_source_ids': audio_sources, 'asset_ids': [a['id'] for a in assets],
-                   'speech_ids': [a['id'] for a in available], 'model': MODEL_NAME, 'speech_skipped': len(spoken) - len(available)}
+                   'speech_ids': [a['id'] for a in available], 'model': MODEL_NAME, 'speech_ready': speech_ready, 'speech_skipped': len(spoken) - len(available)}
         conn.execute('INSERT INTO jobs (id,project_id,kind,status,payload,created,updated) VALUES (?,?,?,?,?,?,?)',
                      (job_id, ident, 'guided_edit', 'queued', json.dumps(payload, ensure_ascii=False), time.time(), time.time()))
     return {'job_id': job_id}

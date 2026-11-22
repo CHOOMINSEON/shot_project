@@ -50,10 +50,12 @@ class ModelPreparation:
     def snapshot(self):
         with self.lock:
             status, phase = self.status, self.phase
+        from studio.settings import MODEL_NAME
+        size = '3GB' if MODEL_NAME == 'large-v3' else '1.5GB'
         messages = {
             'waiting': '한국어 자막 모델 준비를 시작합니다. 영상 업로드와 기획부터 사용할 수 있어요.',
             'preparing': ('받은 모델을 확인하고 있습니다. 영상 업로드와 기획은 먼저 사용할 수 있어요.'
-                          if phase == 'loading' else '한국어 자막 모델을 준비하고 있습니다(처음 한 번, 약 1.5GB). 영상 업로드와 기획부터 사용할 수 있어요.'),
+                          if phase == 'loading' else f'한국어 자막 모델을 준비하고 있습니다(처음 한 번, 약 {size}). 영상 업로드와 기획부터 사용할 수 있어요.'),
             'ready': '자막 모델 준비 완료 · 음성 인식을 사용할 수 있어요.',
             'error': '자막 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 확인한 뒤 다시 시도해 주세요.',
         }

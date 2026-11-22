@@ -153,3 +153,16 @@ def test_captions_without_vad_keep_asr_times():
     asset = _caption_asset(words, [])
     items = timeline.generate_captions({'clips': [{'id': 'c', 'asset_id': 'a', 'start': 0, 'end': 3}], 'captions': {'items': []}}, {'a': asset})['items']
     assert items[0]['start'] == 1. and items[0]['end'] >= 1.5
+
+
+def test_transcript_vocabulary_and_retranscribe_rules():
+    from studio import worker
+    state = {'vocabulary': 'CU 소금우유, 크림브륄레\n크림브륄레', 'scene_products': [{'name': '호지차', 'brand': 'GS25', 'variant': ''}]}
+    vocab = worker.transcript_vocabulary(state)
+    assert vocab == 'CU 소금우유, 크림브륄레, 호지차 GS25'
+    done = {'analysis': {'transcribed': True, 'model': 'medium', 'vocabulary': vocab}}
+    assert worker.needs_transcript(done, 'large-v3', vocab)             # 더 정확한 모델이 생겼다
+    assert not worker.needs_transcript(done, 'medium', vocab)           # 같은 모델·같은 단어장
+    assert worker.needs_transcript(done, 'medium', vocab + ', 신상')     # 단어장이 바뀌었다
+    assert not worker.needs_transcript(done, 'large-v3', vocab, ready=False)  # 모델 준비 전엔 기존 인식 사용
+    assert worker.needs_transcript({'analysis': {}}, 'medium', '', ready=False)
