@@ -184,3 +184,9 @@ main.studio-grid{grid-template-columns:250px minmax(0,1fr) 380px;gap:10px;paddin
 .media-row .asset img{width:26px;height:34px}
 .media-row .asset small{margin-top:2px}
 .studio .timeline-heading .button-row button{padding:5px 9px;font-size:11px}
+/* 마지막 손질: 제목 줄·구간 상세 입력 숨김, 주요 버튼은 재생 막대 끝에 */
+.studio .workspace-toolbar{display:none}
+.studio #clip-editor,.studio .timeline-footer{display:none!important}
+.transport-actions{display:flex;gap:6px;flex:none;margin-left:6px}
+.transport-actions button{font-size:12px;padding:7px 12px;white-space:nowrap}
+.transport-actions button.hidden{display:none}

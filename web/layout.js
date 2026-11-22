@@ -30,6 +30,11 @@ const assets=library?.querySelector('#assets')||q('#assets');
 if(timeline&&assets){const media=document.createElement('div');media.className='media-row';
   media.innerHTML='<div class="media-head"><b>영상 <span id="media-count">0개</span></b><span class="media-add"><label class="button secondary" title="영상 파일 추가">＋ 영상 추가<input type="file" id="timeline-upload" accept="video/*,.mkv,.mov,.mp4" multiple hidden></label><label class="button ghost" title="폴더 안 영상을 모두 추가">📁 폴더 추가<input type="file" id="timeline-upload-folder" webkitdirectory directory multiple hidden></label></span></div>';
   media.appendChild(assets);const head=timeline.querySelector('.timeline-heading');head?head.after(media):timeline.prepend(media);}
+// 자동 편집 시작·추천 재생·최종 다운로드 버튼은 재생 막대 오른쪽 끝으로
+const transport=viewer?.querySelector('.transport');
+if(transport){const acts=document.createElement('div');acts.className='transport-actions';
+  ['guided-start','guided-play','guided-download'].forEach(id=>{const b=guidePane.querySelector('#'+id)||q('#'+id);if(b)acts.appendChild(b);});
+  if(acts.children.length)transport.appendChild(acts);}
 const old=[...main.children];
 main.append(left,center,right);
 old.forEach(e=>{if(e!==left&&e!==center&&e!==right&&!e.children.length)e.remove();else if(e.classList?.contains('workspace'))e.hidden=true;});
