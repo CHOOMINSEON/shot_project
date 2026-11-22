@@ -170,13 +170,14 @@ function setZoom(z,anchorClient){
 zoomBox.addEventListener('click',e=>{const b=e.target.closest('[data-zoom]');if(!b)return;const k=b.dataset.zoom;
   setZoom(k==='fit'?1:zoom*(k==='in'?1.6:1/1.6),k==='fit'?undefined:(wrap.getBoundingClientRect().left+((playheadX()??wrap.scrollLeft+wrap.clientWidth/2)-wrap.scrollLeft)));});
 $('tl-zoom').addEventListener('input',e=>setZoom(fromSlider(+e.target.value)));
-// 휠: Ctrl=확대·축소, 그냥 굴리면 가로로 이동(캡컷처럼), Shift+휠=위아래 줄 이동, 옆으로 기울이는 휠·터치패드 옆 밀기는 그대로 가로 이동
+// 휠: Ctrl=확대·축소, 그냥 굴리거나 Shift+휠은 가로로 이동(캡컷처럼), Alt+휠=위아래 줄 이동, 옆으로 기울이는 휠·터치패드 옆 밀기는 그대로 가로 이동
 wrap.addEventListener('wheel',e=>{
   if(e.ctrlKey||e.metaKey){e.preventDefault();setZoom(zoom*Math.pow(1.0015,-e.deltaY),e.clientX);return;}
   const unit=e.deltaMode===1?32:e.deltaMode===2?wrap.clientWidth:1;
-  if(e.shiftKey){e.preventDefault();wrap.scrollTop+=(e.deltaY||e.deltaX)*unit;return;}
+  if(e.altKey){e.preventDefault();wrap.scrollTop+=(e.deltaY||e.deltaX)*unit;return;}
   if(Math.abs(e.deltaX)>Math.abs(e.deltaY))return;
   e.preventDefault();wrap.scrollLeft+=e.deltaY*unit;},{passive:false});
+window.timelineScroll=dir=>{wrap.scrollLeft+=dir*wrap.clientWidth*.12;};
 // 재생헤드가 화면 밖이면 보이게 넘겨 준다
 function keepVisible(){const x=playheadX();if(x===null)return;if(x<wrap.scrollLeft+20||x>wrap.scrollLeft+wrap.clientWidth-40)wrap.scrollLeft=Math.max(0,x-wrap.clientWidth/2);}
 window.timelineNudge=(dt)=>{const x=playheadX(),t=x===null?0:x/pps();seekTo(Math.max(0,t+dt));requestAnimationFrame(keepVisible);setTimeout(keepVisible,120);};
@@ -387,7 +388,8 @@ document.addEventListener('keydown',e=>{
   if(key==='w'||key==='W')return run(trimTail);
   if(key==='Delete'||key==='Backspace')return run(focusLayer&&selectedLayer?removeLayer:removeSelected);
   if(key===' ')return run(()=>{if(!p.paused)return p.pause();if(!p.src&&project.state.clips.length)seekTo(0);return p.play();});
-  if(key==='ArrowLeft'||key==='ArrowRight')return run(()=>window.timelineNudge((key==='ArrowLeft'?-1:1)*(e.shiftKey?1:frame())));
+  if(key==='ArrowLeft'||key==='ArrowRight')return run(()=>window.timelineScroll((key==='ArrowLeft'?-1:1)*(e.shiftKey?4:1)));
+  if(key===','||key==='.'||key==='<'||key==='>')return run(()=>window.timelineNudge((key===','||key==='<'?-1:1)*(e.shiftKey?1:frame())));
   if(key==='ArrowUp'||key==='ArrowDown')return run(()=>window.timelineJump(key==='ArrowUp'?-1:1));
   if(key==='['||key===']')return run(()=>{const n=selected+(key==='['?-1:1);if(project.state.clips[n])selectClip(n,false);});
 });
