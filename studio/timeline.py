@@ -4,7 +4,7 @@ import math
 import re
 
 from .settings import MAX_OUTPUT_SECONDS
-from . import proofreading
+from . import proofreading, conti
 
 
 def finite(value):
@@ -313,7 +313,8 @@ def generate_captions(state, assets, target=14):
     best = {}
     for i, clip in enumerate(clips):
         if clip['asset_id'] not in aligned:
-            aligned[clip['asset_id']] = voice_words(assets[clip['asset_id']])
+            # 영상 콘티의 편의점·제품 이름으로 인식 오류를 고친다('수유 소금우유는' → 'CU 소금우유는', '호주차' → '호지차')
+            aligned[clip['asset_id']] = conti.correct_words(voice_words(assets[clip['asset_id']]), state.get('storyboard', ''))
         for n, word in enumerate(aligned[clip['asset_id']]):
             inside = min(word['end'], clip['end']) - max(word['start'], clip['start'])
             if inside < min(.08, (word['end'] - word['start']) * .5):

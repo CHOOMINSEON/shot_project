@@ -845,3 +845,31 @@ def test_eating_moments_pick_the_bite_and_the_show_inside_each_silent_eating_str
     kept = [{'kind': 'speech', 'asset_id': 'v', 'start': 40, 'end': 43, 'speech_start': 40, 'labels': ['taste'], 'text': '음 짭짤하고 달아요.'}]
     _, count, _ = guided.overlay_eating(kept, extra=moments)
     assert count == 1 and kept[0]['overlay']['start'] >= 19   # 말 위에 먹방 순간
+
+
+def test_conti_narration_length_sets_how_long_the_opening_slot_is():
+    # 영상 콘티 첫 세 줄(원본에 없는 나레이션) ≈ 10초 → 1.3배속 전 원본 기준 약 12초를 서로 다른 컷으로 채운다.
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿이에요.', 10, 13), w(2, ' 이건 8점 드릴게요.', 20, 22),
+             w(3, ' 다음은 호지차예요.', 30, 32), w(4, ' 이건 6점 드릴게요.', 40, 42)]
+    v = asset(words, 60)
+    d = asset([], 200, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text, tags, shot):
+        r = frame(i, t, t + 2, tags, shot=shot)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(i, 2 + 16 * i, '', {'comparison': .3}, i) for i in range(5)] + \
+             [row(20 + i, 90 + 2 * i, '소금우유', {'packaging': .3}, 20 + i) for i in range(4)] + \
+             [row(30 + i, 120 + 2 * i, '호지지', {'packaging': .3}, 30 + i) for i in range(4)] + \
+             [row(40 + i, 140 + 8 * i, '', {'crosssection': .4}, 40 + i) for i in range(6)]
+    seconds = {}
+    for narration in (None, 9.5):
+        rules = guided.parse_guideline(default_guideline() + '\n후 나레이션 포함', 'oneshot')
+        if narration:
+            rules['narration_seconds'] = narration
+        result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+        slot = [c for c in result['clips'] if '후 나레이션' in c['guided']['units'][0].get('reason', '')]
+        seconds[narration] = sum(c['end'] - c['start'] for c in slot)
+        spans = [(c['start'], c['end']) for c in slot]
+        assert all(not (a < y and b > x) for i, (a, b) in enumerate(spans) for x, y in spans[i + 1:]), spans
+    assert seconds[9.5] > seconds[None] and 10 <= seconds[9.5] <= 13, seconds

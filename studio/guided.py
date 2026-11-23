@@ -1065,6 +1065,9 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                 s -= .5
             # 완성본 1123에서 사용자가 남긴 평가 = 자기 취향·이유가 담긴 문장("저는 크런키한 식감이 좋더라고요",
             # "진짜 꿀이랑 배맛이 너무 잘 나는데요?", "묶어서 판매해주세요"). 뺀 문장 = "맛있다." 같은 두세 단어 감탄.
+            # 영상 콘티 [실제 반응] 단서(커스터드·짠맛·호지차 향·꿀맛 …)가 든 평가는 남긴다.
+            if set(u['labels']) & {'taste', 'pro', 'con'} and any(w in u['text'] for ws in (rules.get('conti_hints') or {}).values() for w in ws):
+                s += 1.5
             if set(u['labels']) & {'taste', 'pro', 'con'}:
                 if OPINION.search(u['text']):
                     s += 1.5
@@ -1149,7 +1152,9 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     # 후 나레이션 자리가 있으면 제품별 첫 컷(상자)을 그 자리에 쓰고, 나머지를 설명 발화에 쓴다(한 컷은 한 번만).
     story = _storyboard(broll, order, _detail_wants(kept), 1) if broll and rules.get('post_narration') else None
     # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
-    slot = _opening_slot(broll, order, fps, story=story) if rules.get('post_narration') and broll and not scene_mode else []
+    # 영상 콘티 첫 줄들이 원본에 없는 나레이션이면 그 읽는 길이(배속 전 원본 기준)만큼 채운다.
+    slot_len = min(20., max(6., rules['narration_seconds'] * rules.get('playback', 1))) if rules.get('narration_seconds') else 11.
+    slot = _opening_slot(broll, order, fps, length=slot_len, story=story) if rules.get('post_narration') and broll and not scene_mode else []
     if slot:
         notes.append(f'첫 {sum(u["end"] - u["start"] for u in slot):.0f}초(원본 기준)는 후 나레이션 자리예요: 제품 모아 보여 주기·상자·단면 컷 {len(slot)}개(원본 소리). 캡컷에서 나레이션을 녹음해 얹으세요.')
     if not slot and rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
@@ -1602,7 +1607,7 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
     """
     step = 1 / fps
     snap = lambda x: round(x / step) * step
-    lineup = _spread([s for s in shots if s['lineup'] and not s['used']], 4, LINEUP_GAP)
+    lineup = _spread([s for s in shots if s['lineup'] and not s['used']], 6 if length > 11 else 4, LINEUP_GAP)
     if story is None:
         story = _storyboard(shots, order, {}, 1)
     boxes = {n: v[0] for n, v in story.items() if v and not v[0]['used']}
@@ -1613,7 +1618,9 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
             mid = len(same) // 2   # 움직임 값이 없으면 단면 영상 가운데(자르는 손이 지나간 뒤 단면이 보이는 쪽)
             cuts.append(min(same, key=lambda c: (c.get('motion') is None, c.get('motion') or 0, abs(same.index(c) - mid))))   # 가장 덜 흔들린 단면 컷
             seen.add(s['asset_id'])
-    picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:4]
+    picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:]
+    # 콘티 나레이션이 길면(1122 콘티 첫 세 줄 ≈ 10초) 컷을 늘리고, 그래도 모자라면 한 컷을 1.5초까지 길게 쓴다.
+    piece = min(1.5, max(piece, length / max(1, len(picked))))
     units, total = [], 0.
     for s in picked:
         take = min(piece, s['end'] - s['start'], length - total)
@@ -1627,6 +1634,26 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
         total += take
         if total >= length - .5:
             break
+    if units and total < length - .5:
+        # 아직 나레이션보다 짧으면 앞에 쓴 컷과 다른 장면(6초 이상·그림 다름)의 단면·제품 모아 보여 주기 컷을 더 잇는다.
+        chosen = [s for s in picked if s['used']]
+        reserved = [v for vs in story.values() for v in vs]
+        pool = [s for s in shots if not s['used'] and (s['lineup'] or s['role'] == 'crosssection')
+                and not any(s is v for v in reserved) and all(_apart(s, c, LOOK_GAP) for c in chosen)]
+        for s in _spread(pool, int((length - total) / piece) + 1, LOOK_GAP):
+            take = min(piece, s['end'] - s['start'], length - total)
+            if take < .5 or not all(_apart(s, c, LOOK_GAP) for c in chosen):
+                continue
+            a = snap((s['start'] + s['end'] - take) / 2)
+            units.insert(len(units) - min(2, len(units) // 3), {   # 마지막 '다시 들고 있는 컷' 앞에 넣는다
+                'kind': 'visual', 'asset_id': s['asset_id'], 'filename': '', 'start': a, 'end': snap(a + take),
+                'role': s['role'], 'labels': [s['role']], 'visual_roles': [s['role']], 'text': '', 'review': ['후 나레이션 자리 · 캡컷에서 녹음'],
+                'drop': None, 'opening_slot': True})
+            s['used'] = True
+            chosen.append(s)
+            total += take
+            if total >= length - .5:
+                break
     return units if len(units) >= 3 else []
 
 

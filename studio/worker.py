@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
+from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports, conti
 from .media import Cancelled, compose_layers, probe, render_piece, run_ffmpeg, speed_up
 from .settings import ASR_BEAM, ASR_THREADS, DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
@@ -621,6 +621,21 @@ def guided_edit(ident, payload):
                 detected['guideline'] = True
         # 영상 콘티의 '목표 N초'는 해석할 때만 앞에 붙인다(저장하는 지침 원문은 그대로).
         rules = guided.parse_guideline(guided.storyboard_guideline(payload['guideline'], payload.get('storyboard', '')), style)
+        story_text = payload.get('storyboard', '') or ''
+        if story_text.strip():
+            # 영상 콘티 대사: 편의점·제품 이름으로 인식 오류를 고친 단어로 편집한다(저장된 인식 결과는 그대로).
+            for asset in videos:
+                if asset['analysis'].get('words'):
+                    asset['analysis'] = {**asset['analysis'], 'words': conti.correct_words(asset['analysis']['words'], story_text)}
+            said, seconds = conti.narration_lines(story_text, [w for a in videos for w in a['analysis'].get('words', [])])
+            if said:
+                # 콘티 앞 줄이 원본 어디에도 없으면 캡컷에서 따로 녹음하는 나레이션이다: 그 길이만큼 첫 부분을 베스트 컷으로 채운다.
+                rules['post_narration'] = True
+                rules['narration_seconds'] = seconds
+                rules['applied'].append(f'영상 콘티 첫 {len(said)}줄은 원본에 없는 나레이션 → 첫 약 {seconds:.0f}초 나레이션 자리')
+            rules['conti_hints'] = conti.hints(story_text)
+            if rules['conti_hints']:
+                rules['applied'].append('영상 콘티 [실제 반응] 단서(' + ' · '.join(w for ws in rules['conti_hints'].values() for w in ws[:2]) + ')가 든 평가 우선')
         if rules.get('scenes') and scenes.records:
             # 지시문의 '남길 장면'마다 화면 검색(CLIP·OCR)으로 후보를 찾아 둔다.
             rules['scene_hits'] = {}
