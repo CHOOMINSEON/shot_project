@@ -977,3 +977,23 @@ def test_silence_is_removed_outside_the_opening_narration_slot():
     voice = 1.5 + 1.2 + 1.2
     assert heard < voice + .6, clips            # 쉼(0.3초·1초)과 앞뒤 여유가 거의 남지 않음
     assert all(any(c['start'] <= x + .01 and c['end'] >= y - .01 for c in clips) for x, y in ((10, 11.5), (11.8, 13), (14, 15.2)))
+
+
+def test_word_said_twice_in_one_breath_keeps_one():
+    # 사용자 '단어가 중복되면 안돼': 1122 '아니 맛은 맛은 있거든요?'
+    words = [(1145.59, 1145.8, ' 아니'), (1145.8, 1146.0, ' 맛은'), (1146.02, 1146.33, ' 맛은'), (1146.36, 1147.2, ' 있거든요?')]
+    assert guided.word_repeats(words) == [(1145.8, 1146.02)]
+    assert guided.word_repeats([(0, .3, ' 이건'), (.3, .6, ' 8점'), (.7, 1., ' 이건'), (1., 1.3, ' 8점'), (1.3, 1.8, ' 드릴게요')]) == [(0., .7)]
+    assert guided.word_repeats([(0, .3, ' 진짜'), (2., 2.3, ' 진짜')]) == []          # 따로 떨어져 말한 건 그대로
+    left = guided.voiced({'speech': [[1145.59, 1147.16]], 'restarts': [(1145.8, 1146.02)]})
+    assert left == [(1145.59, 1145.8), (1146.02, 1147.16)]                          # '아니'는 남는다
+    w0 = [w(1, ' 오늘은 초콜릿을 먹어볼게요.', 1, 3),
+          {'id': 'm1', 'text': ' 아니', 'start': 1145.59, 'end': 1145.8, 'confidence': .95},
+          {'id': 'm2', 'text': ' 맛은', 'start': 1145.8, 'end': 1146.33, 'confidence': .95},
+          {'id': 'm3', 'text': ' 있거든요?', 'start': 1146.36, 'end': 1147.16, 'confidence': .95}]
+    a = asset(w0, 1200)
+    a['analysis']['speech'] = [[1, 3], [1145.59, 1147.16]]
+    a['analysis']['restarts'] = [(1145.8, 1146.02)]
+    clips = guided.plan([a], guided.parse_guideline(default_guideline(), 'oneshot'), {'v': []}, {})['clips']
+    heard = [(c['start'], c['end']) for c in clips if c['end'] > 1100]
+    assert heard and not any(s < 1146.0 and e > 1145.82 for s, e in heard), heard   # 앞의 '맛은'은 들리지 않음

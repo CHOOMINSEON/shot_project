@@ -759,6 +759,27 @@ def find_restarts(bursts, gap=3.):
     return out
 
 
+def word_repeats(words, gap=.6):
+    """한 숨에 같은 말을 두 번 한 곳의 앞쪽 [(시작, 끝)]. words: 목소리 구간을 따로 받아 적은 단어 [(시작, 끝, 글자)].
+
+    사용자: '단어가 중복되면 안돼'(1122 '아니 맛은 맛은 있거든요?' 1145.6~1147.2초, 쉼 없이 이어 말함).
+    같은 단어(또는 두 단어 묶음)가 바로 이어 나오면 앞의 것을 뺀다(뒤 단어 시작 직전까지).
+    """
+    norm = lambda t: re.sub(r'[^가-힣A-Za-z0-9]', '', t or '')
+    out, i = [], 0
+    while i < len(words):
+        for n in (2, 1):
+            a, b = words[i:i + n], words[i + n:i + 2 * n]
+            if len(b) == n and all(norm(x[2]) for x in a) and [norm(x[2]) for x in a] == [norm(x[2]) for x in b] \
+                    and b[0][0] - a[-1][1] < gap:
+                out.append((float(a[0][0]), float(b[0][0])))
+                i += n
+                break
+        else:
+            i += 1
+    return out
+
+
 ENDINGS = set('요다데고서죠까네지게')   # 말이 끝난 글자: 다음 말이 우연히 같은 소리로 시작해도 더듬은 게 아니다
 
 
@@ -845,9 +866,12 @@ def voiced(analysis):
     for a, b in analysis.get('speech') or []:
         pieces = [(float(a), float(b))] if b > a else []
         for x, y in restarts:
-            if any(q0 < y and q1 > x for q0, q1 in pieces):   # 앞 시도 사이 짧은 멈춤 조각(0.25초 미만)은 남기지 않는다
-                pieces = [p for q0, q1 in pieces for p in ((q0, min(q1, x)), (max(q0, y), q1)) if p[1] - p[0] >= .25]
-        out += pieces
+            if any(q0 < y and q1 > x for q0, q1 in pieces):
+                pieces = [p for q0, q1 in pieces for p in ((q0, min(q1, x)), (max(q0, y), q1)) if p[1] - p[0] >= .05]
+        edges = [t for x, y in restarts for t in (x, y)]
+        touch = lambda t: any(abs(t - e) < .02 for e in edges)
+        # 앞 시도 두 개 사이에 낀 짧은 멈춤 조각(0.25초 미만)은 남기지 않는다('이건 8점 드 | 이건 8점 드릴게요' 사이)
+        out += [(a0, b0) for a0, b0 in pieces if b0 - a0 >= .25 or not (touch(a0) and touch(b0))]
     return out
 
 
@@ -1010,6 +1034,17 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
             # 먹방 등: 문장 안에서 0.5초 넘게 멈춘 곳(씹는 중·생각 중)은 0.3초 숨만 남기고 줄인다.
             unit['pauses'] = [(a + PAUSE_KEEP[0], b - PAUSE_KEEP[1]) for a, b in s['pauses']
                               if b - a > PAUSE_LONG and b - PAUSE_KEEP[1] - (a + PAUSE_KEEP[0]) >= .15]
+        inside = [(max(x, unit['start']), min(y, unit['end'])) for x, y in restarts if x < unit['end'] - .05 and y > unit['start'] + .05]
+        if inside:
+            # 다시 말한 앞 시도·두 번 말한 단어는 말끝 여유 없이 정확히 잘라 낸다(쉼 자르기와 합친다)
+            cuts = sorted(list(unit.get('pauses', [])) + inside)
+            merged = []
+            for a, b in cuts:
+                if merged and a <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+                else:
+                    merged.append((a, b))
+            unit['pauses'] = merged
         if s['confidence'] < .5:
             unit['review'].append('인식 신뢰도 낮음 · 원음 확인 필요')
         prod = product_for(rows, evidence, asset['id'])

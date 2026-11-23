@@ -532,7 +532,8 @@ def find_restarts(ident, videos, clips):
         if not bursts:
             continue
         texts = dict(analysis.get('burst_text') or {})
-        todo = [(a, b) for a, b in bursts if f'{a:.2f}' not in texts]
+        words = dict(analysis.get('burst_words') or {})
+        todo = [(a, b) for a, b in bursts if f'{a:.2f}' not in texts or f'{a:.2f}' not in words]
         if todo:
             model = load_model(analysis.get('model') if analysis.get('model') in MODEL_RANK else None)
             for n, (a, b) in enumerate(todo):
@@ -545,17 +546,24 @@ def find_restarts(ident, videos, clips):
                 if not len(audio):
                     continue
                 segments, _ = model.transcribe(audio, language='ko', beam_size=ASR_BEAM, vad_filter=False,
-                                               condition_on_previous_text=False, without_timestamps=True)
+                                               condition_on_previous_text=False, word_timestamps=True)
+                segments = list(segments)
                 texts[f'{a:.2f}'] = ' '.join(seg.text.strip() for seg in segments).strip()
+                base = max(0., a - .1)
+                words[f'{a:.2f}'] = [[round(base + float(x.start), 3), round(base + float(x.end), 3), x.word]
+                                     for seg in segments for x in (seg.words or [])]
         found = guided.find_restarts([{'start': a, 'end': b, 'text': texts.get(f'{a:.2f}', '')} for a, b in bursts])
+        for a, b in bursts:   # 한 숨에 같은 단어를 두 번('맛은 맛은'): 앞의 것을 뺀다
+            found += guided.word_repeats(words.get(f'{a:.2f}', []))
         old = [tuple(r) for r in analysis.get('restarts') or []]
         new = [r for r in found if r not in old]
         with db.connection() as conn:
             stored = db.get_asset(asset['id'])['analysis']
             stored['burst_text'] = texts
+            stored['burst_words'] = words
             stored['restarts'] = sorted(set(old) | set(found))
             conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(stored, ensure_ascii=False), asset['id']))
-        asset['analysis'] = {**analysis, 'burst_text': texts, 'restarts': sorted(set(old) | set(found))}
+        asset['analysis'] = {**analysis, 'burst_text': texts, 'burst_words': words, 'restarts': sorted(set(old) | set(found))}
         total += len(new)
     return total
 
