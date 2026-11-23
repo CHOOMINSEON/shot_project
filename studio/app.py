@@ -169,9 +169,18 @@ def project(ident):
         raise HTTPException(404, '프로젝트를 찾을 수 없습니다.')
     value = dict(row)
     value['state'] = json.loads(value['state'])
+    value['assets'] = [db.get_asset(a['id']) for a in assets]
+    if timeline.stale_captions(value['state']):
+        # 이전 버전 방식으로 만든 자막(같은 단어가 컷마다 반복되던 것)은 열 때 새 방식으로 다시 만든다. 직접 고친 자막은 유지.
+        try:
+            value['state']['captions'] = timeline.sync_captions(value['state'], value['state'], {a['id']: a for a in value['assets']})
+            with db.connection() as conn:   # 내용은 같은 편집이라 revision은 올리지 않는다(열린 화면의 저장이 충돌하지 않게)
+                conn.execute('UPDATE projects SET state=? WHERE id=? AND revision=?',
+                             (json.dumps(value['state'], ensure_ascii=False), ident, value['revision']))
+        except (KeyError, ValueError, TypeError):
+            pass
     for item in value['state'].get('captions', {}).get('items', []):
         item['reviewed'] = proofreading.approved(item)
-    value['assets'] = [db.get_asset(a['id']) for a in assets]
     value['duration'] = timeline.duration(value['state'].get('clips', []))
     value['signature'] = timeline.signature(value['state'])
     value['render_signature'] = timeline.render_signature(value['state'])

@@ -268,6 +268,17 @@ def voice_words(asset):
     return result
 
 
+CAPTION_ENGINE = 3   # 자막 만드는 방식이 바뀌면 올린다. 이전 방식으로 만든 자막은 프로젝트를 열 때 다시 만든다.
+
+
+def stale_captions(state):
+    caps = state.get('captions') or {}
+    items = caps.get('items') or []
+    # 인식 결과로 만든 자막만 다시 만든다. 직접 입력한 자막(인식 근거 없음)만 있으면 그대로 둔다.
+    return caps.get('engine', 0) < CAPTION_ENGINE and any(i.get('source_key') for i in items) \
+        and all(i.get('source_key') or i.get('edited') for i in items)
+
+
 def generate_captions(state, assets, target=14):
     target = max(10, min(30, int(target)))
     result = []
@@ -289,10 +300,30 @@ def generate_captions(state, assets, target=14):
     def contiguous(a, b):
         return a['asset_id'] == b['asset_id'] and abs(a['end'] - b['start']) < .02
 
-    placed = []
+    # 1) 단어마다 '목소리가 가장 많이 들어 있는 컷' 하나를 고르고, 같은 단어(원본·단어 번호)는 영상 전체에서 한 번만 쓴다.
+    #    (1122 프로젝트 실측: 0.27초 몽타주 컷 4개에 '먼저'가 4번, 쉼을 뺀 컷 3개에 '필링까지'가 3번 나왔다.)
+    #    컷 안에 0.08초도 안 남은 단어는 잘려 나간 말이라 쓰지 않는다.
+    # 같은 원본 소리가 뒤로 감기지 않고 이어지는 컷들(몽타주 조각·쉼을 뺀 컷)을 한 덩어리로 본다. 사용자가 컷을 복제해
+    # 같은 소리가 실제로 두 번 나오면 덩어리가 달라 자막도 두 번 나온다.
+    runs, run = [], 0
+    for i, clip in enumerate(clips):
+        if i and (clip['asset_id'] != clips[i - 1]['asset_id'] or clip['start'] < clips[i - 1]['end'] - .05):
+            run += 1
+        runs.append(run)
+    best = {}
     for i, clip in enumerate(clips):
         if clip['asset_id'] not in aligned:
             aligned[clip['asset_id']] = voice_words(assets[clip['asset_id']])
+        for n, word in enumerate(aligned[clip['asset_id']]):
+            inside = min(word['end'], clip['end']) - max(word['start'], clip['start'])
+            if inside < min(.08, (word['end'] - word['start']) * .5):
+                continue
+            key = (runs[i], clip['asset_id'], word.get('id', n))
+            if key not in best or inside > best[key][0] + 1e-6:
+                best[key] = (inside, i, word)
+    placed = []
+    for inside, i, word in sorted(best.values(), key=lambda v: (v[1], v[2]['start'])):
+        clip = clips[i]
         # 소리가 끊김 없이 이어지는 앞뒤 컷(몽타주 조각)까지는 단어가 걸쳐 보여도 된다.
         lo = i
         while lo > 0 and contiguous(clips[lo - 1], clips[lo]):
@@ -301,12 +332,13 @@ def generate_captions(state, assets, target=14):
         while hi + 1 < len(clips) and contiguous(clips[hi], clips[hi + 1]):
             hi += 1
         span0, span1 = offsets[lo], offsets[hi] + clips[hi]['end'] - clips[hi]['start']
-        for word in aligned[clip['asset_id']]:
-            mid = (word['start'] + word['end']) / 2
-            if clip['start'] - 1e-4 <= mid < clip['end'] - 1e-4:   # 경계는 뒤 컷(부동소수 오차 허용)
-                placed.append({'word': word, 'clip': clip,
-                               'start': max(span0, offsets[i] + word['start'] - clip['start']),
-                               'end': min(span1, offsets[i] + word['end'] - clip['start'])})
+        start = max(span0, offsets[i] + word['start'] - clip['start'])
+        end = min(span1, offsets[i] + word['end'] - clip['start'])
+        if placed and placed[-1]['word']['text'].strip() == word['text'].strip() and start - placed[-1]['end'] < .5:
+            placed[-1]['end'] = max(placed[-1]['end'], end)   # 인식기가 같은 말을 겹쳐 적은 것(먼저 먼저)은 하나로
+            continue
+        if end > start:
+            placed.append({'word': word, 'clip': clip, 'start': start, 'end': end})
     bucket = []
 
     def flush():
@@ -366,11 +398,18 @@ def generate_captions(state, assets, target=14):
         if second and first['end'] > second['start']:
             first['end'] = second['start']
     result = [c for c in result if c['end'] > c['start']]
+    deduped = []
+    for c in result:   # 마지막 안전장치: 바로 앞 자막과 글자가 같고 붙어 있으면 하나로 합친다
+        if deduped and c['text'].strip() == deduped[-1]['text'].strip() and c['start'] - deduped[-1]['end'] < .5:
+            deduped[-1]['end'] = c['end']
+            continue
+        deduped.append(c)
+    result = deduped
     archive = state.get('captions', {}).get('archived_edits', [])[:]
     archive += [{**item, 'archive_reason': '구간·글자 수가 바뀌어 자동 대응하지 못한 수정 자막'}
                 for item in existing.values() if item.get('edited') and item['id'] not in used]
     archive = list({(c['id'], c['text']): c for c in archive}.values())
-    return {'signature': signature(state), 'items': result, 'archived_edits': archive}
+    return {'signature': signature(state), 'items': result, 'archived_edits': archive, 'engine': CAPTION_ENGINE}
 
 
 
