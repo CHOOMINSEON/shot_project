@@ -774,6 +774,29 @@ def split_bursts(envelope, speech, dip=.08, shortest=.3):
     return out
 
 
+def retold(start, end, voice, restarts, taken=(), reach=3.):
+    """목소리가 모두 '다시 말한 앞 시도'인 문장 → 뒤에 다시 말한 목소리 구간 (시작, 끝), 없으면 None.
+
+    1122 원본 349~351초 '이건 8점 드(멈춤) 이건 8점 드릴게요'만 받아 적혔고, 끝까지 다시 말한 351.7~352.9초
+    '이거는 8점 드릴게요'에는 단어가 없었다. 앞 시도 바로 뒤(3초 안) 단어 없는 목소리를 그 문장으로 쓴다.
+    taken: 다른 문장 단어가 있는 시간 [(시작, 끝)].
+    """
+    mine = [(a, b) for a, b in restarts if a < end + .5 and b > start - .5]
+    if not mine or any(a < end and b > start for a, b in voice):
+        return None
+    t = max(b for _, b in mine)
+    out = []
+    for a, b in voice:
+        if a < t or a - (out[-1][1] if out else t) > (reach if not out else .7):
+            if out:
+                break
+            continue
+        if any(x < b and y > a for x, y in taken):
+            break
+        out.append((a, b))
+    return (out[0][0], out[-1][1]) if out else None
+
+
 def voiced(analysis):
     """목소리(VAD) 구간에서 버벅이며 다시 말한 앞 시도(analysis['restarts'])를 잘라 낸 것."""
     restarts = sorted((float(x), float(y)) for x, y in analysis.get('restarts') or [])
@@ -781,7 +804,8 @@ def voiced(analysis):
     for a, b in analysis.get('speech') or []:
         pieces = [(float(a), float(b))] if b > a else []
         for x, y in restarts:
-            pieces = [p for q0, q1 in pieces for p in ((q0, min(q1, x)), (max(q0, y), q1)) if p[1] - p[0] > .05]
+            if any(q0 < y and q1 > x for q0, q1 in pieces):   # 앞 시도 사이 짧은 멈춤 조각(0.25초 미만)은 남기지 않는다
+                pieces = [p for q0, q1 in pieces for p in ((q0, min(q1, x)), (max(q0, y), q1)) if p[1] - p[0] >= .25]
         out += pieces
     return out
 
@@ -818,7 +842,7 @@ PAUSE_KEEP = (.18, .12)  # 문장 안 긴 쉼을 줄일 때 남기는 앞·뒤 �
 PAUSE_LONG = .5          # 이보다 긴 문장 안 쉼만 줄인다
 
 
-def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
+def snap_to_voice(start, end, voice, lo=0., hi=float('inf'), swallow=False):
     """인식기(Whisper) 문장 시간 → 실제 목소리(VAD) 기준 시간.
 
     실제 원테이크 먹방 원본(1122 가나 프리미엄)에서 Whisper 단어 시간이 실제 목소리보다 0.4~1초 늦거나
@@ -837,7 +861,7 @@ def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
     s = max(inside[0][0], start - VOICE_REACH, lo)
     e = min(inside[-1][1], hi, end + .6)
     covered = sum(max(0., min(b, end) - max(a, start)) for a, b in inside)
-    if covered < .4 * (end - start):
+    if covered < .4 * (end - start) and not swallow:   # 반복을 삼킨 긴 단어가 있으면 덮인 비율이 원래 낮다
         # 배경 소음이 커서 VAD가 목소리를 일부만 잡은 경우: 인식기 시간에서 0.25초까지만 줄인다(말 잘림 방지).
         s, e = min(s, start + .25), max(e, min(end - .25, hi))
     if e - s < .15:
@@ -886,10 +910,21 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
     pre = .08 if fast else .12
     envelope = asset.get('_envelope')
     voice = voiced(asset['analysis'])
+    restarts = [(float(x), float(y)) for x, y in asset['analysis'].get('restarts') or []]
     prev_end = 0.
     for i, s in enumerate(sentences):
         nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
-        s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt)
+        if restarts and not any(a < s['end'] and b > s['start'] for a, b in voice) \
+                and any(a < s['end'] and b > s['start'] for a, b in restarts):
+            # 같은 말을 반복했다고 이미 뺀 문장(mark_redundant)의 목소리는 이 문장이 다시 쓸 수 있다('이마트24도 허니페어인데' 세 번)
+            again = retold(s['start'], s['end'], voice, restarts, [(x['start'], x['end']) for x in sentences if x is not s and not x['drop']])
+            if again:   # 끝까지 다시 말한 목소리(단어 없음)를 이 문장으로 쓴다('이건 8점 드…' → '이거는 8점 드릴게요')
+                s.update(start=again[0], end=again[1], word_times=[])
+                nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
+            else:       # 1122 '밀크초콜릿에 소금을': 뒤 문장에서 다시 말했다
+                s['drop'] = s.get('drop') or ('retake', '버벅이며 다시 말한 앞 시도(뒤에 다시 말함)')
+        swallow = any(w1 - w0 > SWALLOW for w0, w1 in s.get('word_times', []))
+        s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt, swallow)
         if gaps:
             s0, gaps = skip_swallowed(s0, s1, gaps, s.get('word_times', []))
         if envelope:

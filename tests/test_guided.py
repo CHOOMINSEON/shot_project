@@ -927,3 +927,20 @@ def test_speech_start_is_pulled_back_when_vad_starts_late():
     assert guided.speech_head(None, 3.0) == 3.0
     quiet = np.full(1000, 45., dtype=np.float32); quiet[300:] = 80.
     assert guided.speech_head({**env, 'db': quiet}, 3.0) == 3.0           # 이미 맞으면 그대로
+
+
+def test_line_said_again_without_words_uses_the_last_attempt():
+    # 1122 원본 349~353초: '이건 8점 드(멈춤) 이건 8점 드릴게요 / 이거는 8점 드릴게요'. 받아 적힌 건 첫 시도뿐.
+    words = [w(1, ' 오늘은 초콜릿을 먹어볼게요.', 300, 303), w(2, ' 단짠단짠해서 맛있네요.', 330, 333),
+             {'id': 'x1', 'text': ' 이건', 'start': 349.11, 'end': 349.15, 'confidence': .9},
+             {'id': 'x2', 'text': ' 8점', 'start': 349.15, 'end': 350.33, 'confidence': .9},
+             {'id': 'x3', 'text': ' 드릴게요.', 'start': 350.33, 'end': 350.87, 'confidence': .9}]
+    a = asset(words, 400)
+    a['analysis']['speech'] = [[300, 303], [330, 333], [348.98, 349.65], [349.82, 350.78], [351.67, 352.86]]
+    a['analysis']['restarts'] = [[348.98, 349.65], [349.82, 350.78]]
+    result = guided.plan([a], guided.parse_guideline(default_guideline(), 'oneshot'), {'v': []}, {})
+    heard = [(c['start'], c['end']) for c in result['clips'] if c['end'] > 345]
+    assert any(s <= 351.7 and e >= 352.8 for s, e in heard), heard          # 끝까지 다시 말한 '이거는 8점 드릴게요'
+    assert not any(s < 350.7 and e > 349 for s, e in heard), heard          # 앞 시도는 들리지 않음
+    placed = [x for x in timeline.voice_words(a) if x['text'].strip(' .') in ('이건', '8점', '드릴게요')]
+    assert all(351.6 <= x['start'] < 352.9 for x in placed), placed           # 자막도 다시 말한 곳에

@@ -216,7 +216,8 @@ def voice_words(asset):
     voice = voiced(analysis)   # 버벅이며 다시 말한 앞 시도는 편집에서 빠지므로 자막도 거기 두지 않는다
     if not voice or not words:
         return [dict(w) for w in words]
-    from .guided import skip_swallowed, snap_to_voice
+    from .guided import SWALLOW, retold, skip_swallowed, snap_to_voice
+    restarts = [(float(x), float(y)) for x, y in analysis.get('restarts') or []]
     groups, bucket = [], []
     for word in words:
         if bucket and (word['start'] - bucket[-1]['end'] > .7 or word['end'] - bucket[0]['start'] > 12):
@@ -233,7 +234,12 @@ def voice_words(asset):
     for i, group in enumerate(groups):
         start, end = float(group[0]['start']), float(group[-1]['end'])
         nxt = float(groups[i + 1][0]['start']) if i + 1 < len(groups) else duration
-        s0, s1, gaps = snap_to_voice(start, end, voice, prev_end, nxt)
+        swallow = any(float(w['end']) - float(w['start']) > SWALLOW for w in group)
+        again = retold(start, end, voice, restarts, [(float(g[0]['start']), float(g[-1]['end'])) for g in groups if g is not group]) \
+            if restarts else None
+        if again:   # 앞 시도만 받아 적힌 문장: 끝까지 다시 말한 목소리에 자막을 놓는다(편집도 그쪽을 쓴다)
+            start, end, swallow = again[0], again[1], True
+        s0, s1, gaps = snap_to_voice(start, end, voice, prev_end, max(nxt, end), swallow)
         if gaps:   # 자동 편집이 빼는 '받아 적지 않은 반복' 구간에는 자막 단어를 펼치지 않는다
             s0, gaps = skip_swallowed(s0, s1, gaps, [(float(w['start']), float(w['end'])) for w in group])
         pieces, cursor = [], s0
@@ -248,9 +254,8 @@ def voice_words(asset):
             prev_end = end
             continue
 
-        from .guided import SWALLOW
         spans = [(float(w['start']), float(w['end'])) for w in group]
-        if any(b - a > SWALLOW for a, b in spans):
+        if swallow:
             # 한 단어가 반복·재시작을 삼켜 길게 찍힌 문장(1122 '필링까지' 133~141초)은 인식기 시간 비율이 틀린다.
             # 글자 수 비율로 목소리 구간에 펼친다(사용자 캡처: '필링까지' 다음 '캐러멜칩이'를 말하는 0:14에 자막이 없었다).
             sizes = [max(1, len(re.sub(r'[^가-힣A-Za-z0-9]', '', w['text']))) for w in group]
