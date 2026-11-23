@@ -888,10 +888,15 @@ def test_talking_always_shows_the_face_and_narration_only_over_eating():
     detail = [frame(10, 5, 6.5, {'packaging': .3}, shot=7), frame(11, 20, 21.5, {'packaging': .3}, shot=8)]
     ev = {('v', frames[0]['id']): [{'name': '소금우유', 'status': 'confirmed'}],
           ('d', detail[1]['id']): [{'name': '소금우유', 'status': 'confirmed'}]}
+    # 단, 따로 찍어 끼워 둔 같은 제품 컷은 '제품 설명' 위에는 들어간다(2026-11-23 '내가 중간중간 끼워둔 영상이 아예 없어').
     result, _, _ = two_takes(words, frames, detail, ev, face_talk=True)
+    inserted = [c for c in result['clips'] if c['asset_id'] == 'v' and c.get('visual_asset_id', 'v') == 'd']
+    assert inserted and all(c['guided']['units'][0]['role'] == 'describe' for c in inserted), inserted
     for c in result['clips']:
-        if c['asset_id'] == 'v' and c.get('visual_asset_id', 'v') != 'v':
+        if c['asset_id'] == 'v' and c.get('visual_asset_id', 'v') not in ('v', 'd'):
             raise AssertionError(f'말 위에 다른 원본 화면: {c}')
+        if c in inserted:
+            continue
         if c['asset_id'] == 'v' and c.get('visual_start') is not None and abs(c['visual_start'] - c['start']) > .05:
             assert 28 <= c['start'] <= 34, c                       # 다른 화면은 맛 평가(먹은 뒤 소감) 위의 먹는 화면뿐
             assert 16 <= c['visual_start'] <= 26, c                # 먹는 장면(18~26초) 근처
@@ -997,3 +1002,8 @@ def test_word_said_twice_in_one_breath_keeps_one():
     clips = guided.plan([a], guided.parse_guideline(default_guideline(), 'oneshot'), {'v': []}, {})['clips']
     heard = [(c['start'], c['end']) for c in clips if c['end'] > 1100]
     assert heard and not any(s < 1146.0 and e > 1145.82 for s, e in heard), heard   # 앞의 '맛은'은 들리지 않음
+
+
+def test_product_name_joined_by_symbol_stays_one_word():
+    # 1122: 콘티로 고친 '허니&페어인데'가 '허니'·'페어'로 갈라져 '필링이랑'이 제품 이름이 됐고, 허니페어 상자 컷이 하나도 안 들어갔다.
+    assert guided._name_tokens('이마트24도 허니&페어인데') == ['허니페어']

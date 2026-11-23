@@ -1404,7 +1404,8 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     broll = _detail_shots(assets, frames_by_asset, evidence, names) if rules.get('bites') and not scene_mode else []
     order = [names[k][0] for k in sorted(names)]
     # 후 나레이션 자리가 있으면 제품별 첫 컷(상자)을 그 자리에 쓰고, 나머지를 설명 발화에 쓴다(한 컷은 한 번만).
-    story = _storyboard(broll, order, _detail_wants(kept), 1) if broll and rules.get('post_narration') else None
+    allow = DESCRIBE_LABELS if rules.get('face_talk') else DETAIL_LABELS
+    story = _storyboard(broll, order, _detail_wants(kept, allow), 1) if broll and rules.get('post_narration') else None
     # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
     # 영상 콘티 첫 줄들이 원본에 없는 나레이션이면 그 읽는 길이(배속 전 원본 기준)만큼 채운다.
     slot_len = min(20., max(6., rules['narration_seconds'] * rules.get('playback', 1))) if rules.get('narration_seconds') else 11.
@@ -1416,8 +1417,8 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         if pieces:
             kept[0]['montage'] = pieces
             notes.append(f'첫 멘트 아래에 제품 여러 개를 들어 보이는 컷 {len(pieces)}개를 이어 붙였어요(직접 편집본 1123 방식).')
-    if broll and not rules.get('face_talk'):   # 말할 때는 얼굴: 설명 위에 디테일 컷을 얹지 않는다(디테일 컷은 첫 나레이션 자리에만)
-        laid = _overlay_details([u for u in kept if not u.get('montage')], broll, story)
+    if broll:   # face_talk면 제품 설명 발화에만 끼운다(맛·점수·총평은 얼굴)
+        laid = _overlay_details([u for u in kept if not u.get('montage')], broll, story, allow)
         if laid:
             notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품마다 촬영 구간 처음·가운데·끝에서 서로 다른 장면으로 골랐어요.')
     kept = slot + kept
@@ -1594,6 +1595,10 @@ def hook_montage(hook, shots, fps=30, fast_piece=.28, max_fast=5):
 DETAIL_TAKE = (8, .03)   # 단어 8개 미만·말소리 3% 미만인 영상 = 따로 찍은 디테일 컷(제품·포장·단면)
 DETAIL_SHOW = (.8, 1.4)  # 디테일 컷 하나를 보여 주는 길이(완성본 1123 실측 0.75~1.5초)
 DETAIL_LABELS = {'describe', 'intro', 'compare', 'taste', 'pro', 'con', 'price'}
+# 말할 때는 얼굴 규칙(face_talk)에서도 따로 찍어 둔 제품·단면 컷은 '제품 설명'(포장·재료·필링 설명) 위에는 끼운다.
+# 사용자(2026-11-23 '내가 중간중간 끼워둔 영상이 아예 없어'): 직접 편집본 1123도 필링·캐러멜칩·배시럽 설명 위에 같은 제품 컷을 넣었다.
+# 맛 평가·장점·점수·총평은 얼굴(맛 평가는 먹는 화면 나레이션)로 둔다.
+DESCRIBE_LABELS = {'describe', 'intro'}
 FACE_LABELS = {'score', 'conclusion', 'repurchase', 'question', 'wrapup'}
 
 
@@ -1614,7 +1619,8 @@ JOSA = ('부터는', '부터', '인데', '에는', '이라', '이에요', '예�
 
 def _name_tokens(text):
     out = []
-    for raw in re.findall(r'[가-힣A-Za-z0-9]+', text):
+    # '허니&페어', '허니-페어'처럼 기호로 이은 이름은 한 단어로 본다(1122: '허니'·'페어인데'로 갈라져 '필링이랑'이 이름이 됐다).
+    for raw in re.findall(r'[가-힣A-Za-z0-9]+(?:[&+·\-][가-힣A-Za-z0-9]+)*', text):
         word = re.sub(r'[^가-힣]', '', raw)
         for j in JOSA:
             if word.endswith(j) and len(word) - len(j) >= 2:
@@ -1799,13 +1805,13 @@ def _spread(pool, k, gap):
     return sorted(picked, key=lambda s: (s['asset_id'], s['start']))
 
 
-def _detail_wants(kept):
+def _detail_wants(kept, allow=DETAIL_LABELS):
     """디테일 컷을 얹을 발화를 제품별로 모은다(소개·설명·맛 평가 앞부분). 점수·결론·시식 직후 반응은 얼굴."""
     wants = {}
     for u, k in _product_blocks(kept):
         name = (u.get('product') or {}).get('name') or u.get('auto_product')
         labels = set(u['labels'])
-        if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
+        if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & allow:
             continue
         if u['end'] - u['start'] - .8 < DETAIL_SHOW[0]:
             continue
@@ -1830,9 +1836,9 @@ def _storyboard(shots, names, wants, reserve=0):
     return story
 
 
-def _overlay_details(kept, shots, story=None):
+def _overlay_details(kept, shots, story=None, allow=DETAIL_LABELS):
     """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 한 컷은 한 번만 쓴다."""
-    wants = _detail_wants(kept)
+    wants = _detail_wants(kept, allow)
     story = story if story is not None else _storyboard(shots, list(wants), wants)
     count = 0
     for name, units in wants.items():
