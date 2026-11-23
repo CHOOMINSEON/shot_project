@@ -212,7 +212,8 @@ def voice_words(asset):
     """
     analysis = asset.get('analysis', {})
     words = [w for w in analysis.get('words', []) if finite(w.get('start')) and finite(w.get('end')) and w['end'] > w['start']]
-    voice = [(float(a), float(b)) for a, b in (analysis.get('speech') or []) if b > a]
+    from .guided import voiced
+    voice = voiced(analysis)   # 버벅이며 다시 말한 앞 시도는 편집에서 빠지므로 자막도 거기 두지 않는다
     if not voice or not words:
         return [dict(w) for w in words]
     from .guided import skip_swallowed, snap_to_voice

@@ -514,6 +514,52 @@ def edit_script(ident, payload):
     return {**result,**exported}
 
 
+def find_restarts(ident, videos, clips):
+    """편집에 남은 말 근처 목소리 구간을 하나씩 따로 받아 적어 '버벅이며 다시 말한 앞 시도'를 찾는다 → 새로 찾은 개수.
+
+    전체 인식은 반복을 한 번으로 줄여 적는다(1122 원본 121~144초: '먼저, 먼저 CU 소금우유는 / 밀크초콜릿에 소금을 …'
+    을 네 번 다시 말했는데 '먼저 수유 소금우유는 밀크초콜릿에 … 필링까지'로 한 번만 적혔다). 구간별 글자는
+    analysis['burst_text']에, 찾은 앞 시도는 analysis['restarts']에 저장해 다음 편집·자막에서 다시 쓴다.
+    """
+    total = 0
+    for asset in videos:
+        analysis = asset['analysis']
+        if not analysis.get('words') or not analysis.get('speech'):
+            continue
+        spans = [(c['start'], c['end']) for c in clips if c['asset_id'] == asset['id']]
+        near = [(a, b) for a, b in analysis['speech'] if b - a >= .2 and any(a < y + 4 and b > x - 1 for x, y in spans)]
+        bursts = guided.split_bursts(asset.get('_envelope'), near)   # VAD 한 구간 안의 짧은 멈춤에서도 나눈다
+        if not bursts:
+            continue
+        texts = dict(analysis.get('burst_text') or {})
+        todo = [(a, b) for a, b in bursts if f'{a:.2f}' not in texts]
+        if todo:
+            model = load_model(analysis.get('model') if analysis.get('model') in MODEL_RANK else None)
+            for n, (a, b) in enumerate(todo):
+                check_cancel(ident)
+                update(ident, .5 + .05 * n / len(todo), f'다시 말한 곳 찾기 {n + 1}/{len(todo)}')
+                raw = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-ss', f'{max(0., a - .1):.3f}', '-i', str(asset_path(asset['id'])),
+                                      '-t', f'{b - a + .2:.3f}', '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', '-'],
+                                     capture_output=True, timeout=120, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+                audio = np.frombuffer(raw[:len(raw) // 2 * 2], '<i2').astype(np.float32) / 32768.
+                if not len(audio):
+                    continue
+                segments, _ = model.transcribe(audio, language='ko', beam_size=ASR_BEAM, vad_filter=False,
+                                               condition_on_previous_text=False, without_timestamps=True)
+                texts[f'{a:.2f}'] = ' '.join(seg.text.strip() for seg in segments).strip()
+        found = guided.find_restarts([{'start': a, 'end': b, 'text': texts.get(f'{a:.2f}', '')} for a, b in bursts])
+        old = [tuple(r) for r in analysis.get('restarts') or []]
+        new = [r for r in found if r not in old]
+        with db.connection() as conn:
+            stored = db.get_asset(asset['id'])['analysis']
+            stored['burst_text'] = texts
+            stored['restarts'] = sorted(set(old) | set(found))
+            conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(stored, ensure_ascii=False), asset['id']))
+        asset['analysis'] = {**analysis, 'burst_text': texts, 'restarts': sorted(set(old) | set(found))}
+        total += len(new)
+    return total
+
+
 def audio_envelope(asset):
     """10ms 단위 음량(dB). 말끝 여유(guided.speech_tail)에 쓴다. 원본별로 한 번만 계산해 저장한다."""
     path = asset_path(asset['id'])
@@ -662,6 +708,17 @@ def guided_edit(ident, payload):
             if asset['analysis'].get('words'):
                 asset['_envelope'] = audio_envelope(asset)   # 말끝이 잘리지 않게 실제 음량으로 끝 여유를 정한다
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+        try:
+            found = find_restarts(ident, videos, planned['clips'])
+        except Cancelled:
+            raise
+        except Exception as exc:   # 다시 말한 곳 찾기가 실패해도 편집은 만든다
+            stage_log(ident, f'다시 말한 곳 찾기 실패: {exc}')
+            found = 0
+        if found:
+            update(ident, .55, f'버벅이며 다시 말한 앞 시도 {found}곳을 빼고 다시 구성')
+            planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+            planned['warnings'].append(f'버벅이며 다시 말한 앞 시도 {found}곳은 빼고 마지막(끝까지 말한) 시도만 남겼어요.')
         for asset in videos:
             asset.pop('_envelope', None)   # 저장되는 데이터에 섞이지 않게
         lines = []
