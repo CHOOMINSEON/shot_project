@@ -627,6 +627,11 @@ def guided_edit(ident, payload):
         if payload.get('frame') in ('blur', 'fill', 'fit'):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
+        with db.connection() as conn:
+            title = conn.execute('SELECT name FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+        if title and guided.POST_NARRATION.search(title['name'] or '') and not rules.get('post_narration'):
+            rules['post_narration'] = True   # 프로젝트 이름에 '후 나레이션'이 적힌 영상: 첫 부분을 나레이션 자리로 비워 둔다
+            rules['applied'].append('프로젝트 이름의 "후 나레이션" → 첫 부분에 나레이션 자리')
         stage_log(ident, '제품 근거 계산 끝')
         speed = 1.   # 배속은 넣지 않는다(사용자가 캡컷에서 직접 적용)
         update(ident, .5, '지침에 따라 구간 선택·구성')

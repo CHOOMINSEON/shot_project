@@ -173,6 +173,7 @@ KEEP_WORDS = [('packaging', r'포장|제품명|패키지|간판|이름'), ('open
 DROP_WORDS = [('prep', r'준비|카메라'), ('repeat', r'반복'), ('retake', r'말실수'), ('silence', r'무음|대기')]
 ORDER_WORDS = [('intro', r'제품 소개|소개'), ('opening', r'개봉'), ('crosssection', r'내용물|단면'),
                ('eating', r'시식|먹|체험'), ('taste', r'평가'), ('conclusion', r'결론')]
+POST_NARRATION = re.compile(r'후\s*나레이션|나레이션\s*후\s*(작업|녹음)|후\s*녹음|나레이션\s*(포함|따로)')
 UNSUPPORTED = ['음악', '효과음', '전환 효과', '얼굴 추적', '줌인', '자막 스타일']
 
 
@@ -401,6 +402,11 @@ def parse_guideline(text, style='oneshot'):
         rules['applied'].append(f'목표 길이는 {rules["playback"]:g}배속 후 기준 · 원본 분량 {rules["target"][0] * rules["playback"]:.0f}~{rules["target"][1] * rules["playback"]:.0f}초 남김(배속은 캡컷에서)')
     rules['overlay_eating'] = food and not re.search(r'평가\s*소리.*얹지\s*마|화면\s*바꾸지\s*마', text)
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
+    # 첫 후킹 나레이션을 캡컷에서 따로 녹음하는 영상(사용자 편집본 1123: 첫 10초 = 후녹음 나레이션 + 제품 모아 보여 주기 컷).
+    # 영상마다 다르므로 프로젝트 이름이나 지침에 '후 나레이션'이 적혀 있을 때만 그 자리를 비워 둔다.
+    rules['post_narration'] = bool(POST_NARRATION.search(text)) and not re.search(r'후\s*나레이션\s*(없|안|빼|제외)', text)
+    if rules['post_narration']:
+        rules['applied'].append('첫 부분에 후 나레이션(캡컷 녹음) 자리: 제품 모아 보여 주기·상자·단면 컷 약 10초')
     if rules['overlay_eating']:
         rules['applied'].append('맛 평가 소리 위에 직전의 먹는·단면 화면 얹기')
     if rules['hook_montage']:
@@ -1095,7 +1101,10 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                 u['auto_product'] = names[k][0]
     broll = _detail_shots(assets, frames_by_asset, evidence, names) if rules.get('bites') and not scene_mode else []
     # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
-    if rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
+    slot = _opening_slot(broll, [names[k][0] for k in sorted(names)], fps) if rules.get('post_narration') and broll and not scene_mode else []
+    if slot:
+        notes.append(f'첫 {sum(u["end"] - u["start"] for u in slot):.0f}초(원본 기준)는 후 나레이션 자리예요: 제품 모아 보여 주기·상자·단면 컷 {len(slot)}개(원본 소리). 캡컷에서 나레이션을 녹음해 얹으세요.')
+    if not slot and rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
         pieces = _opening_lineup(kept[0], broll, fps) if broll else []
         if pieces:
             kept[0]['montage'] = pieces
@@ -1104,6 +1113,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         laid = _overlay_details([u for u in kept if not u.get('montage')], broll)
         if laid:
             notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품은 말한 이름과 포장 글자로 맞췄어요.')
+    kept = slot + kept
     kept = _cut_pauses(kept)   # 문장 안 긴 쉼 줄이기(해석 영상은 모든 쉼, 그 외는 0.5초 넘는 쉼)
     clips = _merge_clips(kept, assets, rules, fps)
     overlays = []
@@ -1189,6 +1199,8 @@ def _reason(u):
         text = ', '.join(LABEL_KO.get(l, l) for l in u['labels'])
         extra = f' · 화면: {", ".join(ROLE_LABEL.get(r, r) for r in u["visual_roles"])}' if u['visual_roles'] else ''
         return f'실제 발화({text}){extra}'
+    if u.get('opening_slot'):
+        return f'후 나레이션 자리 · {ROLE_LABEL.get(u["role"], u["role"])} 컷(캡컷에서 나레이션 녹음)'
     if u.get('bite'):
         return '시식 장면 · 먹는 순간과 표정 반응(얼굴 화면 그대로)'
     if u['kind'] == 'visual' and u.get('overlaid'):
@@ -1441,6 +1453,38 @@ def _overlay_details(kept, shots):
         s['used'] = True
         count += 1
     return count
+
+
+def _opening_slot(shots, order, fps=30, length=11., piece=.9):
+    """후 나레이션 자리: 첫 약 10초(원본 기준 11초 = 1.3배속 후 약 8.5초)를 사용자 편집본 1123 첫 부분처럼 채운다.
+
+    1123 첫 10초 실측: 제품 4개를 들고 있는 컷 → 제품별 상자 컷(테이블) → 단면 컷 → 다시 들고 있는 컷, 한 컷 0.3~1초(배속 후).
+    소리는 각 컷 원본 소리(말 없음). 캡컷에서 후킹 나레이션을 녹음해 얹는다. 말하는 원본은 쓰지 않는다(첫 문장이 바로 나오지 않게).
+    """
+    step = 1 / fps
+    snap = lambda x: round(x / step) * step
+    lineup = [s for s in shots if s['lineup'] and not s['used']]
+    by = {}
+    for s in shots:
+        if not s['used'] and s['product'] and s['product'] != MULTI and s['role'] in ('packaging', 'opening'):
+            by.setdefault(s['product'], []).append(s)
+    boxes = {n: v[len(v) // 2] for n, v in by.items()}   # 제품 구간 가운데(경계 쪽은 옆 제품 상자일 수 있음)
+    cuts = [s for s in shots if not s['used'] and not s['lineup'] and s['role'] == 'crosssection']
+    picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:4]
+    units, total = [], 0.
+    for s in picked:
+        take = min(piece, s['end'] - s['start'], length - total)
+        if take < .5:
+            continue
+        a = snap((s['start'] + s['end'] - take) / 2)
+        units.append({'kind': 'visual', 'asset_id': s['asset_id'], 'filename': '', 'start': a, 'end': snap(a + take),
+                      'role': s['role'], 'labels': [s['role']], 'visual_roles': [s['role']], 'text': '', 'review': ['후 나레이션 자리 · 캡컷에서 녹음'],
+                      'drop': None, 'opening_slot': True})
+        s['used'] = True
+        total += take
+        if total >= length - .5:
+            break
+    return units if len(units) >= 3 else []
 
 
 def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):

@@ -770,3 +770,32 @@ def test_auto_products_names_each_product_from_its_intro_and_matches_box_text():
     assert salt and all(19 <= x <= 22 for x in salt), laid
     assert hoji and all(1 <= x <= 4 for x in hoji), laid
     assert not any(29 <= x <= 31 for x in laid.values())
+
+
+def test_post_narration_marker_reserves_opening_with_product_shots():
+    # 사용자: 초반 후킹 나레이션은 캡컷 후작업. 이름·지침에 '후 나레이션'이 있을 때만 첫 부분을 비슷한 장면으로 채운다.
+    assert guided.parse_guideline('후 나레이션 포함', 'oneshot')['post_narration']
+    assert not guided.parse_guideline(default_guideline(), 'oneshot')['post_narration']
+    assert not guided.parse_guideline('후 나레이션 없이', 'oneshot')['post_narration']
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿이에요.', 10, 13), w(2, ' 이건 8점 드릴게요.', 20, 22),
+             w(3, ' 다음은 호지차예요.', 30, 32), w(4, ' 이건 6점 드릴게요.', 40, 42)]
+    v = asset(words, 60)
+    d = asset([], 60, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text, tags):
+        r = frame(i, t, t + .5, tags, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(i, 2 + .5 * i, '', {'comparison': .3}) for i in range(6)] + \
+             [row(20 + i, 20 + .5 * i, '소금우유', {'packaging': .3}) for i in range(4)] + \
+             [row(30 + i, 40 + .5 * i, '호지지', {'packaging': .3}) for i in range(4)]
+    for text, slot in (('후 나레이션 포함', True), ('', False)):
+        rules = guided.parse_guideline(default_guideline() + '\n' + text, 'oneshot')
+        result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+        first = sorted(result['clips'], key=lambda c: c.get('timeline_start', 0))[:3]
+        opening = [c for c in result['clips'] if c['asset_id'] == 'd']
+        if slot:
+            assert result['clips'][0]['asset_id'] == 'd' and len(opening) >= 3      # 말하는 원본보다 먼저, 원본 소리
+            assert any(19 <= c['start'] <= 22 for c in opening) and any(39 <= c['start'] <= 42 for c in opening)
+        else:
+            assert result['clips'][0]['asset_id'] == 'v'
