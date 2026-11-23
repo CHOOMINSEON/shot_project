@@ -10,12 +10,22 @@ import webbrowser
 from pathlib import Path
 
 
+def whisper_model():
+    """그래픽카드(CUDA)로 인식하면 가장 정확한 large-v3(20분 영상 약 1~2분), CPU면 속도를 위해 medium."""
+    if os.getenv('STUDIO_DEVICE', 'auto').lower() == 'cpu':
+        return 'medium'
+    try:
+        import ctranslate2
+        return 'large-v3' if ctranslate2.get_cuda_device_count() > 0 else 'medium'
+    except Exception:
+        return 'medium'
+
+
 def configure():
     bundle = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1]))
     sys.path.insert(0, str(bundle))
     home_data = Path(os.getenv('LOCALAPPDATA') or Path.home() / '.local' / 'share') / 'IyoringCutStudio'
     os.environ.setdefault('STUDIO_DATA_DIR', str(home_data))
-    os.environ.setdefault('STUDIO_WHISPER_MODEL', 'medium')
     os.environ['PATH'] = str(bundle / 'ffmpeg' / 'bin') + os.pathsep + os.environ.get('PATH', '')
     # 선택 설치: GPU 팩(CUDA 12 / cuDNN 9 DLL)을 실행 파일 옆 gpu 폴더에 풀어 두면 NVIDIA 그래픽카드로 음성 인식을 가속한다.
     gpu = Path(sys.executable).resolve().parent / 'gpu'
@@ -23,6 +33,7 @@ def configure():
         os.environ['PATH'] = str(gpu) + os.pathsep + os.environ.get('PATH', '')
         if hasattr(os, 'add_dll_directory'):
             os.add_dll_directory(str(gpu))
+    os.environ.setdefault('STUDIO_WHISPER_MODEL', whisper_model())
     os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
     os.environ.setdefault('HF_HOME', str(Path(os.environ['STUDIO_DATA_DIR']) / 'huggingface'))
     for stream in [sys.stdout, sys.stderr]:

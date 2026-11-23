@@ -52,7 +52,28 @@ def update(ident, value, message):
 
 MODEL_DEVICE = 'cpu'
 # 한국어 철자·띄어쓰기 기준을 잡아 주는 짧은 문맥(인식 결과에 끼워 넣지 않고 모델의 참고용으로만 사용).
-KOREAN_CONTEXT = '편의점 신상 라면 아이스크림 간식 먹방 리뷰입니다. 맛있어요, 쫄깃해요, 바삭해요, 가격은 이천오백 원이에요.'
+KOREAN_CONTEXT = ('편의점 신상 라면 아이스크림 간식 먹방 리뷰입니다. CU, GS25, 세븐일레븐, 이마트24. '
+                  '크림브륄레, 캐러멜, 필링, 초콜릿, 단짠단짠. 맛있어요, 쫄깃해요, 바삭해요, 가격은 이천오백 원이에요.')
+MODEL_RANK = {'tiny': 0, 'base': 1, 'small': 2, 'medium': 3, 'large-v3': 4}
+
+
+def transcript_vocabulary(state):
+    """인식 단어장: 사용자가 적은 '제품명 · 브랜드 · 자주 쓰는 표현' + 제품 근거로 고른 제품 정보."""
+    items = re.split(r'[,，\n]', state.get('vocabulary', '') or '')
+    items += [' '.join(x for x in [p.get('name', ''), p.get('brand', ''), p.get('variant', '')] if x)
+              for p in state.get('scene_products', []) or []]
+    return ', '.join(dict.fromkeys(i.strip() for i in items if i.strip()))[:1000]
+
+
+def needs_transcript(asset, model, vocabulary, ready=True):
+    """아직 인식 전이거나, 더 정확한 모델·바뀐 단어장으로 다시 인식할 수 있으면 True."""
+    analysis = asset['analysis']
+    if not analysis.get('transcribed'):
+        return True
+    if not ready:
+        return False
+    older = MODEL_RANK.get(analysis.get('model') or 'base', 1) < MODEL_RANK.get(model, 3)
+    return older or (analysis.get('vocabulary', '') or '') != vocabulary
 
 
 def _open_model(factory, directory):
@@ -179,6 +200,8 @@ def analyze(ident, payload):
     data['candidates'] = timeline.cut_candidates(data['speech'], length)
     data['products'] = timeline.product_candidates(data['words'], payload.get('names', []), length) if model else []
     data['transcribed'] = bool(model)
+    if model:
+        data['vocabulary'] = payload.get('vocabulary', '') or ''
     # A VAD-only re-run must not erase a previously completed transcript.
     if not model:
         for key in ['words', 'products', 'transcribed', 'model']:
@@ -189,6 +212,32 @@ def analyze(ident, payload):
             data['silence'] = asset['analysis']['silence']
         conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(data, ensure_ascii=False), asset['id']))
     return {'asset_id': asset['id'], 'candidates': len(data['candidates']), 'words': len(data['words'])}
+
+
+AUDIO_RATE = 48000
+
+
+def join_piece_audio(pieces, lengths, work, cancelled):
+    """조각 소리를 타임라인 길이에 맞춰 샘플 단위로 이어 붙인다(원시 PCM).
+
+    조각 MP4를 '-c copy'로 그냥 이으면 조각마다 AAC 앞 여백(1024샘플)과 프레임 올림이 쌓여 소리가 조각당 약 0.03초씩
+    늦어진다. 실제 1122 미리보기(37조각)에서 끝부분 목소리가 화면·자막보다 1.13초 늦었다. 각 조각을 풀어서
+    '타임라인상 시작~끝' 샘플 수만큼 자르거나 채워 이으면 누적 어긋남이 0이 된다.
+    """
+    out = Path(work) / 'joined-audio.pcm'
+    t = 0.
+    with out.open('wb') as joined:
+        for piece, length in zip(pieces, lengths):
+            raw = Path(piece).with_suffix('.pcm')
+            if not raw.exists():
+                partial = raw.with_suffix('.partial.pcm')
+                run_ffmpeg(['-i', piece, '-vn', '-ac', '2', '-ar', str(AUDIO_RATE), '-f', 's16le', partial], work, cancelled)
+                partial.replace(raw)
+            samples = round((t + length) * AUDIO_RATE) - round(t * AUDIO_RATE)
+            t += length
+            data = raw.read_bytes()[:samples * 4]
+            joined.write(data + b'\0' * (samples * 4 - len(data)))
+    return out
 
 
 def render(ident, payload):
@@ -247,8 +296,12 @@ def render(ident, payload):
         concat = work / 'concat.txt'
         paths = [p.as_posix().replace("'", "'\\''") for p in pieces]
         concat.write_text(''.join("file '" + path + "'\n" for path in paths), encoding='utf-8')
+        audio = join_piece_audio(pieces, [c['end'] - c['start'] for c in clips], work, lambda: is_cancelled(ident))
         run_ffmpeg(['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '0', '-i', concat,
-                    '-c', 'copy', '-movflags', '+faststart', output], work, lambda: is_cancelled(ident))
+                    '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', output],
+                   work, lambda: is_cancelled(ident))
+        audio.unlink(missing_ok=True)
         rendered_info = probe(output)
         if abs(rendered_info['duration'] - (elapsed - group_start)) > .08:
             raise ValueError('렌더 길이가 편집 타임라인과 일치하지 않습니다. 구간 경계를 확인해 주세요.')
@@ -399,12 +452,13 @@ def edit_script(ident, payload):
     if not result.get('applied'):
         with db.connection() as conn:
             raw=conn.execute('SELECT state FROM projects WHERE id=?',(job['project_id'],)).fetchone()
-        product_info=json.loads(raw['state']).get('scene_products',[])
-        vocabulary=', '.join(' '.join([p.get('name',''),p.get('brand',''),p.get('variant','')]) for p in product_info)[:1000]
+        project_state=json.loads(raw['state'])
+        product_info=project_state.get('scene_products',[]) or []
+        vocabulary=transcript_vocabulary(project_state)
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset=db.get_asset(asset_id)
-            if not asset['analysis'].get('transcribed'):
+            if needs_transcript(asset,payload['model'],vocabulary,payload.get('speech_ready',False)):
                 update(ident,0,f'{index+1}/{len(payload["speech_ids"])} · 실제 대사 인식: {asset["name"]}')
                 analyze(ident,{'asset_id':asset_id,'transcribe':True,'model':payload['model'],
                                'script_asset_checkpoint':True,'vocabulary':vocabulary,'names':[p['name'] for p in product_info]})
@@ -510,14 +564,15 @@ def guided_edit(ident, payload):
     if not result.get('applied'):
         with db.connection() as conn:
             raw = conn.execute('SELECT state FROM projects WHERE id=?', (job['project_id'],)).fetchone()
-        product_info = json.loads(raw['state']).get('scene_products', [])
-        vocabulary = ', '.join(' '.join([p.get('name', ''), p.get('brand', ''), p.get('variant', '')]) for p in product_info)[:1000]
+        project_state = json.loads(raw['state'])
+        product_info = project_state.get('scene_products', []) or []
+        vocabulary = transcript_vocabulary(project_state)
         STAGE_CLOCK.pop(ident, None)
         stage_log(ident, '자동 편집 시작')
         for index, asset_id in enumerate(payload['speech_ids']):
             check_cancel(ident)
             asset = db.get_asset(asset_id)
-            if not asset['analysis'].get('transcribed'):
+            if needs_transcript(asset, payload['model'], vocabulary, payload.get('speech_ready', False)):
                 update(ident, 0, f'{index + 1}/{len(payload["speech_ids"])} · 실제 발화 인식: {asset["name"]}')
                 analyze(ident, {'asset_id': asset_id, 'transcribe': True, 'model': payload['model'], 'script_asset_checkpoint': True,
                                 'vocabulary': vocabulary, 'names': [p['name'] for p in product_info]})
@@ -545,8 +600,15 @@ def guided_edit(ident, payload):
         before = json.loads(snapshot['state'])
         scenes = scene_search.Search(assets, before.get('scene_products', []), lambda: check_cancel(ident), '')
         frames_by_asset = {}
-        for row in scenes.records:
-            frames_by_asset.setdefault(row['asset_id'], []).append(row)
+        for n, row in enumerate(scenes.records):
+            # 장면 그림 특징(CLIP)도 같이 넘긴다: 비슷한 장면을 두 번 고르지 않게(원본 기록은 건드리지 않게 복사)
+            vec = scenes.vectors[n] if n < len(scenes.vectors) else None
+            frames_by_asset.setdefault(row['asset_id'], []).append({**row, 'vec': vec} if vec is not None else row)
+        for asset_id, rows in frames_by_asset.items():
+            try:
+                scene_index.add_motion(asset_id, sorted(rows, key=lambda r: r['start']))   # 디테일 컷은 흔들리지 않은 장면을 고른다
+            except Exception:
+                pass
         style = payload['style']
         detected = None
         if style == 'auto':
@@ -572,6 +634,11 @@ def guided_edit(ident, payload):
         if payload.get('frame') in ('blur', 'fill', 'fit'):
             rules['frame'] = payload['frame']
         rules = guided.apply_profile(rules, before.get('style_profile'))
+        with db.connection() as conn:
+            title = conn.execute('SELECT name FROM projects WHERE id=?', (job['project_id'],)).fetchone()
+        if title and guided.POST_NARRATION.search(title['name'] or '') and not rules.get('post_narration'):
+            rules['post_narration'] = True   # 프로젝트 이름에 '후 나레이션'이 적힌 영상: 첫 부분을 나레이션 자리로 비워 둔다
+            rules['applied'].append('프로젝트 이름의 "후 나레이션" → 첫 부분에 나레이션 자리')
         stage_log(ident, '제품 근거 계산 끝')
         speed = 1.   # 배속은 넣지 않는다(사용자가 캡컷에서 직접 적용)
         update(ident, .5, '지침에 따라 구간 선택·구성')

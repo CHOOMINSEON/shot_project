@@ -146,8 +146,8 @@ def test_length_trim_never_cuts_inside_a_sentence_or_drops_conclusion():
         words.append(w(i, f' 일반 이야기 {i}번째 문장이에요.', t, t + 2))
         t += 3
     words.append(w(99, ' 결론은 다시 사 먹고 싶어요.', t, t + 2))
-    result, _, a = run(words, duration=t + 5)
-    assert result['seconds'] <= 90
+    result, rules, a = run(words, duration=t + 5)
+    assert result['seconds'] <= 90 * rules['playback']      # 목표는 배속 후 길이
     assert any('repurchase' in u['labels'] for u in result['units'])
     spans = [(x['speech_start'] if 'speech_start' in x else None) for x in result['units']]
     for clip in result['clips']:
@@ -397,26 +397,61 @@ def test_default_tail_is_longer_than_word_end():
     assert all(u['end'] - (12 if u['start'] < 15 else 22) >= .24 for u in speech)
 
 
-def test_hook_montage_lays_fast_product_shots_under_opening_line():
-    words = [w(1, ' 편의점 신상 찹쌀떡은 과연 무슨 맛일까요?', 1, 5)] + \
-            [w(10 + i, f' 일반 이야기 {i}번째 문장이에요.', 10 + 3 * i, 12 + 3 * i) for i in range(10)]
-    frames = [frame(i, 40 + 8 * i, 41.5 + 8 * i, {'packaging': .3}, shot=10 + i) for i in range(5)] + \
-             [frame(10, 90, 92, {'eating': .3}, shot=30), frame(11, 110, 112, {'crosssection': .3}, shot=40)]
-    result, _, a = run(words, frames=frames, duration=130)
-    timeline.validate_state({'clips': result['clips'], 'fps': 30, 'quality': 'standard', 'protections': []}, {'v': a})
-    head = [c for c in result['clips'] if c.get('visual_asset_id') and c['start'] < 5.3]
-    assert len(head) >= 4, head
-    fast = [c for c in head if c['end'] - c['start'] < .4]
-    assert len(fast) >= 3
-    assert all(39 <= c['visual_start'] <= 80 for c in fast)               # 포장 장면
-    assert any(c['visual_start'] >= 89 for c in head)                     # 한입·단면 장면
-    ordered = sorted(result['clips'], key=lambda c: c['start'])
-    for c, d in zip(ordered, ordered[1:]):
-        assert d['start'] >= c['end'] - 1e-6        # 같은 소리가 두 번 나오지 않음
-    pieces = sorted(head, key=lambda c: c['start'])
-    for c, d in zip(pieces, pieces[1:]):
-        assert abs(d['start'] - c['end']) < 1e-6                           # 소리는 끊김 없이 이어짐
-    assert any('후킹 멘트 아래' in n for n in result['warnings'])
+def two_takes(words, frames, detail_frames, evidence=None, style='oneshot'):
+    """말하는 원본 v + 말 없이 따로 찍은 디테일 컷 원본 d(완성본 1123 촬영 방식)."""
+    v = asset(words, 130)
+    d = {**asset([], 60, name='디테일.mp4', ident='d'), }
+    d['analysis']['speech'] = []
+    rules = guided.parse_guideline(default_guideline(), style)
+    return guided.plan([v, d], rules, {'v': frames, 'd': detail_frames}, evidence or {}), v, d
+
+
+HOOK_WORDS = [w(1, ' 편의점 신상 찹쌀떡 네 가지를 전부 먹어볼게요.', 1, 6)] + \
+             [w(10 + i, f' 일반 이야기 {i}번째 문장이에요.', 10 + 3 * i, 12 + 3 * i) for i in range(10)]
+
+
+def test_opening_never_chops_one_word_into_random_same_take_pieces():
+    # 사용자 피드백 '초반에 왜 그럼': 같은 원본의 장면을 0.28초 조각으로 바꿔 끼우던 방식은 쓰지 않는다.
+    frames = [frame(i, 40 + 8 * i, 41.5 + 8 * i, {'packaging': .3}, shot=10 + i) for i in range(5)]
+    result, _, _ = run(HOOK_WORDS, frames=frames, duration=130)
+    head = [c for c in result['clips'] if c['start'] < 6.5]
+    assert all(c['end'] - c['start'] >= .7 for c in head), head
+    assert not any(c.get('visual_asset_id') == 'v' and c.get('visual_start') != c['start'] for c in head)
+
+
+def test_opening_shows_product_lineup_from_detail_take():
+    lineup = [frame(i, 10 + .5 * i, 10.5 + .5 * i, {'comparison': .3}, shot=1) for i in range(4)] + \
+             [frame(10 + i, 30 + .5 * i, 30.5 + .5 * i, {'comparison': .3}, shot=2) for i in range(4)]
+    result, v, d = two_takes(HOOK_WORDS, [], lineup)
+    timeline.validate_state({'clips': result['clips'], 'fps': 30, 'quality': 'standard', 'protections': []}, {'v': v, 'd': d})
+    head = sorted((c for c in result['clips'] if c.get('visual_asset_id') == 'd' and c['start'] < 6), key=lambda c: c['start'])
+    assert len(head) >= 2, result['clips'][:4]
+    assert all(.79 <= c['end'] - c['start'] <= 1.21 for c in head)             # 0.8~1.2초씩
+    assert all(c['asset_id'] == 'v' for c in head)                            # 소리는 첫 멘트 그대로
+    for c, e in zip(head, head[1:]):
+        assert abs(e['start'] - c['end']) < 1e-6                               # 소리 끊김 없음
+    assert any('1123' in n for n in result['warnings'])
+
+
+def test_detail_shot_lands_only_on_the_same_product_line():
+    words = [w(1, ' 오늘은 편의점 디저트 두 개를 먹어볼게요.', 1, 4),
+             w(2, ' 먼저 소금우유는 밀크초콜릿에 캐러멜칩이 들어갔대요.', 10, 14),
+             w(3, ' 이건 8점 드릴게요.', 20, 22),
+             w(4, ' 다음은 호지차인데 겉에 녹차 파우더가 묻어 있어요.', 30, 34),
+             w(5, ' 이건 6점 드릴게요.', 40, 42)]
+    frames = [frame(1, 10, 14, {}, shot=1), frame(2, 30, 34, {}, shot=2)]
+    detail = [frame(10, 5, 6.5, {'packaging': .3}, shot=5), frame(11, 20, 21.5, {'packaging': .3}, shot=6)]
+    ev = {('v', frames[0]['id']): [{'name': '소금우유', 'status': 'confirmed'}],
+          ('v', frames[1]['id']): [{'name': '호지차', 'status': 'confirmed'}],
+          ('d', detail[0]['id']): [{'name': '호지차', 'status': 'confirmed'}],
+          ('d', detail[1]['id']): [{'name': '소금우유', 'status': 'confirmed'}]}
+    result, _, _ = two_takes(words, frames, detail, ev)
+    laid = [c for c in result['clips'] if c.get('visual_asset_id') == 'd']
+    assert laid, result['clips']
+    for c in laid:
+        line = 'salt' if c['start'] < 16 else 'hoji'
+        assert (20 <= c['visual_start'] <= 21.5) == (line == 'salt'), c       # 다른 제품 디테일 컷은 섞지 않음
+    assert not any(c.get('visual_asset_id') == 'd' and 20 <= c['start'] < 23 for c in result['clips'])   # 점수는 얼굴
 
 
 def test_food_only_effects_are_off_for_commentary_and_vlog():
@@ -606,8 +641,9 @@ def test_adjacent_clips_do_not_overlap_after_frame_rounding():
     assert clips[0]['end'] <= clips[1]['start'] + 1e-9
 
 
-def test_mukbang_keeps_bite_and_reaction_with_face_visible():
+def test_mukbang_eating_shows_under_taste_narration():
     # 1122 원본 모양: 제품을 바꿔 한참 말없이 먹고(먹기 프레임 40초) 나서 맛을 말한다.
+    # 말없이 먹는 장면을 따로 넣지 않고, 먹는 화면 위에 바로 뒤 소감 목소리를 깐다(나레이션).
     words = [w(1, ' 오늘은 편의점 신상 초콜릿을 먹어볼게요.', 2, 5), w(2, ' 단짠단짠한데 크런키한게 씹혀요.', 50, 53),
              w(3, ' 이건 8점 드릴게요.', 56, 58)]
     voice = [(2, 4.8), (50, 52.7), (56, 57.8)]
@@ -615,11 +651,16 @@ def test_mukbang_keeps_bite_and_reaction_with_face_visible():
     frames = [frame(1, 40, 41, {'eating': .9}, shot=3)]
     rules = guided.parse_guideline(guided.default_for('product_mukbang'), 'product_mukbang')
     out = guided.plan([a], rules, {'v': frames}, {})
-    covered = lambda t: any(c['start'] <= t <= c['end'] and not c.get('visual_asset_id') for c in out['clips'])
-    assert covered(40.2)                      # 먹는 순간(원래 화면)
-    assert covered(49.5)                      # 맛을 말하기 직전 표정 반응
-    assert not any(c.get('visual_asset_id') and c['start'] < 53 and c['end'] > 50 for c in out['clips'])   # 첫 평가는 얼굴 그대로
-    assert not covered(45)                    # 말없이 씹는 긴 구간은 줄인다
+    narr = [c for c in out['clips'] if c.get('visual_asset_id')]
+    assert len(narr) == 1
+    n = narr[0]
+    assert n['start'] < 50.2 and n['end'] > 51          # 소리는 소감 발화
+    assert n['visual_start'] < 40.2 < n['visual_end']   # 화면은 먹는 순간
+    assert '나레이션' in n['guided']['units'][0]['reason']
+    # 말없이 먹는 장면을 소리째 따로 넣지 않는다
+    assert not any(c['start'] < 49.5 and c['end'] > 39.5 and not c.get('visual_asset_id') for c in out['clips'])
+    # 남은 소감과 점수는 얼굴 화면
+    assert any(not c.get('visual_asset_id') and c['start'] <= 57 <= c['end'] for c in out['clips'])
 
 
 def test_product_intro_and_ingredients_survive_length_trim():
@@ -648,3 +689,159 @@ def test_short_fragment_is_not_mistaken_for_a_retake():
 
 def guided_tokens(words):
     return tokens(words)
+
+
+def test_target_is_final_length_after_capcut_speed_up():
+    # 완성본 1123: 캡컷 1.3배속 · 62.8초 = 원본 분량 약 82초. 목표 길이를 배속 전 길이로 맞추면 평가 문장이 너무 빠진다.
+    assert guided.parse_guideline(default_guideline(), 'oneshot')['playback'] == 1.3
+    assert guided.parse_guideline('1.4배속으로 올릴 거야', 'oneshot')['playback'] == 1.4
+    assert guided.parse_guideline('배속 없이', 'oneshot')['playback'] == 1
+    assert guided.parse_guideline(default_guideline(), 'commentary')['playback'] == 1
+
+
+def test_length_trim_keeps_opinion_over_bare_exclamation():
+    words = [w(1, ' 오늘은 소금우유 초콜릿을 먹어볼게요.', 1, 4)]
+    t = 10
+    for i in range(14):
+        words.append(w(10 + i, ' 맛있다.' if i % 2 else ' 저는 크런키한 식감이 좋더라고요.', t, t + 2.5))
+        t += 6
+    words.append(w(99, ' 이건 8점 드릴게요.', t, t + 2))
+    result, rules, _ = run(words, guideline='20초', duration=t + 5)
+    texts = [u['text'] for u in result['units']]
+    assert any('좋더라고요' in x for x in texts)
+    gone = [r['text'] for r in result['removed'] if r['reason_code'] == 'length']
+    assert gone and sum('맛있다' in x for x in gone) >= sum('좋더라고요' in x for x in gone)
+
+
+def test_untranscribed_repeat_inside_a_sentence_is_cut():
+    # 실제 원본 134~144초: '필링까지'가 8초짜리 한 단어로 찍혔고 그 사이 목소리 구간은 같은 말을 다시 시작한 부분(두 번 들림).
+    a = asset([], 160)
+    a['analysis']['words'] = [{'id': 'a', 'text': ' 필링까지', 'start': 133.24, 'end': 141.58, 'confidence': .9},
+                              {'id': 'b', 'text': ' 캐러멜칩이', 'start': 141.58, 'end': 143.46, 'confidence': .9},
+                              {'id': 'c', 'text': ' 들어갔다는데.', 'start': 143.46, 'end': 144.78, 'confidence': .9}]
+    a['analysis']['speech'] = [[134.84, 135.03], [135.35, 136.63], [138.42, 139.67], [140.31, 141.56], [142.81, 144.31]]
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    result = guided.plan([a], rules, {'v': []}, {})
+    heard = []
+    for c in result['clips']:
+        heard += [(x0, x1) for x0, x1 in a['analysis']['speech'] if c['start'] < x1 and c['end'] > x0]
+    assert (138.42, 139.67) in [tuple(x) for x in heard] and (142.81, 144.31) in [tuple(x) for x in heard]
+    assert not any(x0 < 137 for x0, _ in heard), result['clips']     # 앞의 반복 시도는 빠짐
+
+
+def test_skip_swallowed_keeps_pieces_where_other_words_start():
+    # '저는 크런키한(1.7초) 식감이 좋더라고요': 두 구간 모두 다른 단어가 시작하므로 하나도 빼지 않는다.
+    s0, gaps = guided.skip_swallowed(1127.77, 1131.1, [(1128.34, 1128.89)],
+                                     [(1127.90, 1127.98), (1127.98, 1129.68), (1129.68, 1130.18), (1130.18, 1131.46)])
+    assert s0 == 1127.77 and gaps == [(1128.34, 1128.89)]
+
+
+def test_eating_overlay_never_crosses_into_the_next_product():
+    # 점수 뒤(다음 제품) 먹는 화면을 앞 제품 소감 위에 얹지 않는다.
+    words = [w(1, ' 오늘은 초콜릿 두 개를 먹어볼게요.', 1, 4),
+             w(2, ' 단짠단짠해서 맛있네요.', 20, 23),
+             w(3, ' 이건 8점 드릴게요.', 30, 32),
+             w(4, ' 다음은 호지차예요.', 40, 42)]
+    frames = [frame(1, 34, 37, {'eating': .4}, shot=5)]
+    result, _, _ = run(words, frames=frames, duration=60)
+    taste = [c for c in result['clips'] if c['start'] < 24 and c['end'] > 20]
+    assert not any(c.get('visual_start', c['start']) >= 32 for c in taste), taste
+
+
+def test_auto_products_names_each_product_from_its_intro_and_matches_box_text():
+    # 제품 등록이 없어도: 점수로 나뉜 제품 구간마다 소개 말에서 이름을 뽑고, 디테일 컷 포장 글자(OCR)와 맞춘다.
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿에 캐러멜칩이 들어갔대요.', 10, 14), w(2, ' 이건 8점 드릴게요.', 20, 22),
+             w(3, ' 다음은 호지차인데 겉에 녹차 파우더가 묻어 있어요.', 30, 34), w(4, ' 이건 6점 드릴게요.', 40, 42),
+             w(5, ' 둘 다 맛은 있는데 묶어서 팔아 주세요.', 50, 53)]
+    v = asset(words, 60)
+    d = asset([], 40, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text):
+        r = frame(i, t, t + .5, {'packaging': .3}, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(1, 2, 'PREMIUM 호지지'), row(2, 2.5, ''), row(3, 3, 'Ghana'), row(4, 20, '소금우유'), row(5, 20.5, 'Cafe'), row(6, 21, ''),
+              row(7, 30, '소금우유 호지차')]   # 상자 두 개가 함께 보이면 어느 한 제품 컷으로 쓰지 않는다
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+    laid = {round(c['start']): c['visual_start'] for c in result['clips'] if c.get('visual_asset_id') == 'd'}
+    salt = [vs for s, vs in laid.items() if s < 16]
+    hoji = [vs for s, vs in laid.items() if 28 < s < 36]
+    assert salt and all(19 <= x <= 22 for x in salt), laid
+    assert hoji and all(1 <= x <= 4 for x in hoji), laid
+    assert not any(29 <= x <= 31 for x in laid.values())
+
+
+def test_post_narration_marker_reserves_opening_with_product_shots():
+    # 사용자: 초반 후킹 나레이션은 캡컷 후작업. 이름·지침에 '후 나레이션'이 있을 때만 첫 부분을 비슷한 장면으로 채운다.
+    assert guided.parse_guideline('후 나레이션 포함', 'oneshot')['post_narration']
+    assert not guided.parse_guideline(default_guideline(), 'oneshot')['post_narration']
+    assert not guided.parse_guideline('후 나레이션 없이', 'oneshot')['post_narration']
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿이에요.', 10, 13), w(2, ' 이건 8점 드릴게요.', 20, 22),
+             w(3, ' 다음은 호지차예요.', 30, 32), w(4, ' 이건 6점 드릴게요.', 40, 42)]
+    v = asset(words, 60)
+    d = asset([], 60, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text, tags):
+        r = frame(i, t, t + .5, tags, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(i, 2 + .5 * i, '', {'comparison': .3}) for i in range(6)] + \
+             [row(20 + i, 20 + .5 * i, '소금우유', {'packaging': .3}) for i in range(4)] + \
+             [row(30 + i, 40 + .5 * i, '호지지', {'packaging': .3}) for i in range(4)]
+    for text, slot in (('후 나레이션 포함', True), ('', False)):
+        rules = guided.parse_guideline(default_guideline() + '\n' + text, 'oneshot')
+        result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+        first = sorted(result['clips'], key=lambda c: c.get('timeline_start', 0))[:3]
+        opening = [c for c in result['clips'] if c['asset_id'] == 'd']
+        if slot:
+            assert result['clips'][0]['asset_id'] == 'd' and len(opening) >= 3      # 말하는 원본보다 먼저, 원본 소리
+            assert any(19 <= c['start'] <= 22 for c in opening) and any(39 <= c['start'] <= 42 for c in opening)
+        else:
+            assert result['clips'][0]['asset_id'] == 'v'
+
+
+def test_same_scene_is_never_shown_twice_and_detail_shots_spread_over_the_product_take():
+    # 사용자 피드백 '똑같은 장면이 2번 나와': 같은 상자 앞면이 첫 장면과 설명 위에 반복됐다.
+    # 직접 편집본 1123: 제품 디테일 영상 구간 처음·가운데·끝에서 한 컷씩(앞면 → 연 상자 → 펼친 낱개).
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿이에요.', 10, 13), w(2, ' 겉은 다크초콜릿이고 안에는 캐러멜칩이 들어갔대요.', 14, 18),
+             w(3, ' 속에는 소금 우유 크림이 들어가 있어요.', 19, 23), w(4, ' 이건 8점 드릴게요.', 30, 32),
+             w(5, ' 다음은 호지차예요.', 40, 42), w(6, ' 이건 6점 드릴게요.', 50, 52)]
+    v = asset(words, 60)
+    d = asset([], 80, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text, tags):
+        r = frame(i, t, t + .5, tags, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(i, 1 + .5 * i, '', {'comparison': .3}) for i in range(4)] + \
+             [row(100 + i, 10 + .5 * i, '소금우유', {'packaging': .3}) for i in range(60)] + \
+             [row(200 + i, 50 + .5 * i, '호지지', {'packaging': .3}) for i in range(8)]
+    rules = guided.parse_guideline(default_guideline() + '\n후 나레이션 포함', 'oneshot')
+    result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+    shown = [(c.get('visual_start', c['start']), c.get('visual_end', c['end'])) for c in result['clips']
+             if c.get('visual_asset_id', c['asset_id']) == 'd']
+    salt = sorted(a for a, b in shown if 10 <= a < 40)
+    assert len(salt) >= 3, shown
+    assert all(b - a >= guided.LOOK_GAP for a, b in zip(salt, salt[1:])), salt          # 같은 상자 장면 반복 없음
+    assert salt[0] < 18 and salt[-1] > 30, salt                                        # 구간 처음부터 끝까지 고르게
+    for i, (a, b) in enumerate(shown):
+        assert not any(x < b and y > a for x, y in shown[i + 1:]), shown               # 같은 원본 구간 두 번 없음
+
+
+def test_eating_moments_pick_the_bite_and_the_show_inside_each_silent_eating_stretch():
+    # 사용자 피드백 '먹방 모습이 사라짐': '먹기' 태그가 드물어 먹는 화면이 거의 안 나왔다.
+    # 말없이 먹는 구간마다 시각 점수가 가장 높은 한입 순간·단면 보여 주는 순간을 고른다(직접 편집본 246·254초 등).
+    v = asset([w(1, ' 먼저 소금우유 먹어볼게요.', 1, 4), w(2, ' 음 짭짤하고 달아요.', 40, 43)], 60)
+    rows = []
+    for i in range(70):
+        t = 4 + .5 * i
+        r = frame(i, t, t + .5, {}, shot=1)
+        r['similarities'] = {'eating': .2 + (.1 if abs(t - 20) < .3 else 0), 'holding': .2 + (.1 if abs(t - 30) < .3 else 0), 'cream': .2, 'crosssection': .2}
+        rows.append(r)
+    moments = guided._eating_moments(v, rows)
+    centres = sorted(round((m['start'] + m['end']) / 2) for m in moments)
+    assert any(abs(c - 20) <= 1 for c in centres) and any(abs(c - 30) <= 1 for c in centres), centres
+    kept = [{'kind': 'speech', 'asset_id': 'v', 'start': 40, 'end': 43, 'speech_start': 40, 'labels': ['taste'], 'text': '음 짭짤하고 달아요.'}]
+    _, count, _ = guided.overlay_eating(kept, extra=moments)
+    assert count == 1 and kept[0]['overlay']['start'] >= 19   # 말 위에 먹방 순간

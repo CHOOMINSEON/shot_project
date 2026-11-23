@@ -202,63 +202,170 @@ def restore_cuts(state, asset_id, candidates):
     return state
 
 
+def voice_words(asset):
+    """인식기 단어 시간 → 실제 목소리(VAD) 위치에 맞춘 단어 시간.
+
+    실제 원본(1122 가나 프리미엄)에서 Whisper 단어 시간이 목소리보다 0.4~1초 늦었고, 한 단어가 문장 안
+    긴 쉼을 덮을 만큼 길게 찍히기도 했다. 자동 편집은 컷을 목소리(VAD) 기준으로 자르므로 자막도 같은 기준으로
+    맞춘다. 문장(쉼 0.7초·문장부호 기준) 단위로 guided.snap_to_voice 로 목소리 시작·끝·문장 안 쉼을 찾고,
+    단어를 인식기 안의 상대 위치 그대로 '목소리가 나는 시간'에만 펼친다. VAD가 없으면 원래 시간을 쓴다.
+    """
+    analysis = asset.get('analysis', {})
+    words = [w for w in analysis.get('words', []) if finite(w.get('start')) and finite(w.get('end')) and w['end'] > w['start']]
+    voice = [(float(a), float(b)) for a, b in (analysis.get('speech') or []) if b > a]
+    if not voice or not words:
+        return [dict(w) for w in words]
+    from .guided import skip_swallowed, snap_to_voice
+    groups, bucket = [], []
+    for word in words:
+        if bucket and (word['start'] - bucket[-1]['end'] > .7 or word['end'] - bucket[0]['start'] > 12):
+            groups.append(bucket)
+            bucket = []
+        bucket.append(word)
+        if re.search(r'[.?!。…]$', word['text'].strip()):
+            groups.append(bucket)
+            bucket = []
+    if bucket:
+        groups.append(bucket)
+    duration = float((asset.get('metadata') or {}).get('duration') or max(w['end'] for w in words))
+    result, prev_end = [], 0.
+    for i, group in enumerate(groups):
+        start, end = float(group[0]['start']), float(group[-1]['end'])
+        nxt = float(groups[i + 1][0]['start']) if i + 1 < len(groups) else duration
+        s0, s1, gaps = snap_to_voice(start, end, voice, prev_end, nxt)
+        if gaps:   # 자동 편집이 빼는 '받아 적지 않은 반복' 구간에는 자막 단어를 펼치지 않는다
+            s0, gaps = skip_swallowed(s0, s1, gaps, [(float(w['start']), float(w['end'])) for w in group])
+        pieces, cursor = [], s0
+        for a, b in gaps:
+            pieces.append((cursor, a))
+            cursor = b
+        pieces.append((cursor, s1))
+        pieces = [(a, b) for a, b in pieces if b > a]
+        total = sum(b - a for a, b in pieces)
+        if total <= 0 or end <= start:
+            result += [dict(w) for w in group]
+            prev_end = end
+            continue
+
+        def place(t):
+            # 인식기 문장 안의 상대 위치(0~1) → 목소리 구간들을 이어 붙인 시간 → 원본 시간
+            left = max(0., min(1., (t - start) / (end - start))) * total
+            for n, (a, b) in enumerate(pieces):
+                if left <= b - a + 1e-9 or n == len(pieces) - 1:
+                    return n, a + min(left, b - a)
+                left -= b - a
+        for word in group:
+            (n0, a), (n1, b) = place(word['start']), place(word['end'])
+            if n1 != n0:
+                # 쉼을 건너는 단어: 가장 많이 걸친 목소리 구간 하나 안에 둔다.
+                best = max(range(n0, n1 + 1), key=lambda n: min(b, pieces[n][1]) - max(a, pieces[n][0]))
+                a, b = max(a, pieces[best][0]), min(b, pieces[best][1])
+            if b - a < .05:
+                b = a + .05
+            result.append({**word, 'start': round(a, 3), 'end': round(b, 3),
+                           'asr_start': word['start'], 'asr_end': word['end']})
+        prev_end = s1
+    return result
+
+
 def generate_captions(state, assets, target=14):
     target = max(10, min(30, int(target)))
-    offset, result = 0., []
+    result = []
     existing = {item['id']: item for item in state.get('captions', {}).get('items', [])}
     by_source = {}
     for item in existing.values():
         if item.get('source_key'):
             by_source.setdefault(item['source_key'], []).append(item)
     used = set()
-    for clip in state.get('clips', []):
-        words = assets[clip['asset_id']]['analysis'].get('words', [])
-        bucket = []
-        def flush():
-            if not bucket:
-                return
-            first, last = bucket[0], bucket[-1]
-            start = offset + max(0, first['start'] - clip['start'])
-            end = offset + min(clip['end'] - clip['start'], last['end'] - clip['start'])
-            text = ''.join(w['text'] for w in bucket).strip()
-            ident = f"{clip['id']}:{first['id']}:{last['id']}"
-            source_key = f"{clip['asset_id']}:{first['id']}:{last['id']}"
-            matches = by_source.get(source_key, [])
-            previous = existing.get(ident) or (matches[0] if len(matches) == 1 else {})
-            if previous:
-                used.add(previous['id'])
-            review_reasons = []
-            if any(w.get('review') for w in bucket):
-                review_reasons.append('인식 신뢰도가 낮은 단어가 있습니다.')
-            if first['start'] < clip['start'] or last['end'] > clip['end']:
-                review_reasons.append('컷 경계에서 단어가 잘릴 수 있습니다.')
-            if end - start < .35 or end - start > 7:
-                review_reasons.append('자막 표시 길이를 확인해 주세요.')
-            current_text = previous.get('text', text)
-            inspection = proofreading.inspect_text(current_text, state.get('corrections', ''))
-            review_reasons += inspection['reasons']
-            if state.get('vocabulary'):
-                review_reasons.append('제품명·브랜드를 등록한 표기와 대조해 주세요.')
-            # Preserve text edits, while always recomputing timing after timeline changes.
-            result.append({'id': ident, 'start': round(start, 3), 'end': round(end, 3),
-                           'text': current_text, 'source_text': text, 'source_key': source_key,
-                           'source_asset_id': clip['asset_id'], 'source_start': max(clip['start'], first['start']),
-                           'source_end': min(clip['end'], last['end']),
-                           'review': bool(review_reasons or inspection['suggestions']), 'review_reasons': review_reasons,
-                           'confidence': round(min(float(w.get('confidence', 0.)) for w in bucket), 3),
-                           'review_token': previous.get('review_token', ''), 'edited': previous.get('edited', False)})
-            bucket.clear()
-        for word in words:
-            if word['end'] <= clip['start'] or word['start'] >= clip['end']:
-                continue
-            if bucket and (len(''.join(w['text'] for w in bucket)) + len(word['text']) > target
-                           or word['start'] - bucket[-1]['end'] > .5):
-                flush()
-            bucket.append(word)
-            if re.search(r'[.!?。]$', word['text'].strip()):
-                flush()
-        flush()
+    aligned = {}
+    # 1) 각 단어를 '목소리 가운데'가 들어 있는 컷 하나에만 놓는다. 몽타주처럼 같은 말을 잘게 나눈 컷이나
+    #    쉼을 뺀 컷에서 같은 단어가 여러 번 자막으로 나오지 않는다.
+    clips = state.get('clips', [])
+    offsets, offset = [], 0.
+    for clip in clips:
+        offsets.append(offset)
         offset += clip['end'] - clip['start']
+
+    def contiguous(a, b):
+        return a['asset_id'] == b['asset_id'] and abs(a['end'] - b['start']) < .02
+
+    placed = []
+    for i, clip in enumerate(clips):
+        if clip['asset_id'] not in aligned:
+            aligned[clip['asset_id']] = voice_words(assets[clip['asset_id']])
+        # 소리가 끊김 없이 이어지는 앞뒤 컷(몽타주 조각)까지는 단어가 걸쳐 보여도 된다.
+        lo = i
+        while lo > 0 and contiguous(clips[lo - 1], clips[lo]):
+            lo -= 1
+        hi = i
+        while hi + 1 < len(clips) and contiguous(clips[hi], clips[hi + 1]):
+            hi += 1
+        span0, span1 = offsets[lo], offsets[hi] + clips[hi]['end'] - clips[hi]['start']
+        for word in aligned[clip['asset_id']]:
+            mid = (word['start'] + word['end']) / 2
+            if clip['start'] - 1e-4 <= mid < clip['end'] - 1e-4:   # 경계는 뒤 컷(부동소수 오차 허용)
+                placed.append({'word': word, 'clip': clip,
+                               'start': max(span0, offsets[i] + word['start'] - clip['start']),
+                               'end': min(span1, offsets[i] + word['end'] - clip['start'])})
+    bucket = []
+
+    def flush():
+        if not bucket:
+            return
+        first, last = bucket[0], bucket[-1]
+        words = [p['word'] for p in bucket]
+        clip, last_clip = first['clip'], last['clip']
+        start, end = first['start'], last['end']
+        text = ''.join(w['text'] for w in words).strip()
+        ident = f"{clip['id']}:{words[0]['id']}:{words[-1]['id']}"
+        source_key = f"{clip['asset_id']}:{words[0]['id']}:{words[-1]['id']}"
+        matches = by_source.get(source_key, [])
+        previous = existing.get(ident) or (matches[0] if len(matches) == 1 else {})
+        if previous:
+            used.add(previous['id'])
+        review_reasons = []
+        if any(w.get('review') for w in words):
+            review_reasons.append('인식 신뢰도가 낮은 단어가 있습니다.')
+        if any(p['word']['start'] < p['clip']['start'] - .05 or p['word']['end'] > p['clip']['end'] + .05 for p in bucket):
+            review_reasons.append('컷 경계에서 단어가 잘릴 수 있습니다.')
+        if end - start < .35 or end - start > 7:
+            review_reasons.append('자막 표시 길이를 확인해 주세요.')
+        current_text = previous.get('text', text)
+        inspection = proofreading.inspect_text(current_text, state.get('corrections', ''))
+        review_reasons += inspection['reasons']
+        if state.get('vocabulary'):
+            review_reasons.append('제품명·브랜드를 등록한 표기와 대조해 주세요.')
+        # Preserve text edits, while always recomputing timing after timeline changes.
+        result.append({'id': ident, 'start': round(start, 3), 'end': round(end, 3),
+                       'text': current_text, 'source_text': text, 'source_key': source_key,
+                       'source_asset_id': clip['asset_id'], 'source_start': max(clip['start'], words[0]['start']),
+                       'source_end': min(last_clip['end'], words[-1]['end']),
+                       'review': bool(review_reasons or inspection['suggestions']), 'review_reasons': review_reasons,
+                       'confidence': round(min(float(w.get('confidence', 0.)) for w in words), 3),
+                       'review_token': previous.get('review_token', ''), 'edited': previous.get('edited', False)})
+        bucket.clear()
+
+    for p in placed:
+        if bucket:
+            prev = bucket[-1]
+            jump = p['word']['start'] - prev['word']['end']
+            # 쉼만 뺀 바로 다음 컷(같은 원본, 2초 안)은 한 자막으로 이어 준다. 다른 장면으로 넘어가면 끊는다.
+            joined = prev['clip'] is p['clip'] or (prev['clip']['asset_id'] == p['clip']['asset_id'] and -.05 <= jump <= 2.)
+            if (not joined or len(''.join(x['word']['text'] for x in bucket)) + len(p['word']['text']) > target
+                    or p['start'] - prev['end'] > .5):
+                flush()
+        bucket.append(p)
+        if re.search(r'[.!?。]$', p['word']['text'].strip()):
+            flush()
+    flush()
+    for first, second in zip(result, result[1:] + [None]):
+        # 너무 짧게 스치는 자막(몽타주 등)은 다음 자막 전까지 최소 0.6초는 보이게 한다.
+        limit = second['start'] if second else offset
+        if first['end'] - first['start'] < .6:
+            first['end'] = round(min(limit, first['start'] + .6), 3)
+        if second and first['end'] > second['start']:
+            first['end'] = second['start']
+    result = [c for c in result if c['end'] > c['start']]
     archive = state.get('captions', {}).get('archived_edits', [])[:]
     archive += [{**item, 'archive_reason': '구간·글자 수가 바뀌어 자동 대응하지 못한 수정 자막'}
                 for item in existing.values() if item.get('edited') and item['id'] not in used]

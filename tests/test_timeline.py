@@ -103,3 +103,66 @@ def test_output_length_limit_does_not_delete_content():
 def test_no_product_is_automatically_confirmed():
     candidates = t.product_candidates([{'start': 0, 'text': '다음은 신상 제품'}], [], 8)
     assert candidates[0]['review']
+
+
+def _caption_asset(words, speech, duration=30.):
+    return {'id': 'a', 'name': 'a.mp4', 'metadata': {'duration': duration},
+            'analysis': {'words': words, 'speech': speech}}
+
+
+def test_captions_follow_real_voice_when_asr_is_late():
+    from studio import timeline
+    # 인식기는 1.0초에 말을 시작했다고 찍었지만 실제 목소리(VAD)는 0.4초부터
+    words = [{'id': 'w0', 'start': 1.0, 'end': 1.6, 'text': ' 먼저', 'confidence': .9},
+             {'id': 'w1', 'start': 1.6, 'end': 2.6, 'text': ' 소금우유는', 'confidence': .9}]
+    asset = _caption_asset(words, [[.4, 2.2]])
+    state = {'clips': [{'id': 'c1', 'asset_id': 'a', 'start': .25, 'end': 2.4}], 'captions': {'items': []}}
+    items = timeline.generate_captions(state, {'a': asset})['items']
+    assert len(items) == 1 and items[0]['text'] == '먼저 소금우유는'
+    assert abs(items[0]['start'] - .15) < .05      # 0.4 - 0.25 (컷 시작)
+    assert items[0]['end'] <= 2.2 - .25 + .01
+
+
+def test_montage_pieces_do_not_repeat_the_same_word():
+    from studio import timeline
+    words = [{'id': 'w0', 'start': 10., 'end': 11.2, 'text': ' 먼저', 'confidence': .9},
+             {'id': 'w1', 'start': 11.2, 'end': 12., 'text': ' 소금우유는', 'confidence': .9}]
+    asset = _caption_asset(words, [[10., 12.]])
+    clips = [{'id': f'c{i}', 'asset_id': 'a', 'start': 10 + i * .3, 'end': 10.3 + i * .3} for i in range(4)]
+    clips.append({'id': 'c4', 'asset_id': 'a', 'start': 11.2, 'end': 12.})
+    items = timeline.generate_captions({'clips': clips, 'captions': {'items': []}}, {'a': asset})['items']
+    text = ' '.join(i['text'] for i in items)
+    assert text.count('먼저') == 1 and text.count('소금우유는') == 1
+
+
+def test_words_land_outside_removed_pause():
+    from studio import timeline
+    # 한 단어가 1.5초 쉼을 덮을 만큼 길게 찍혔다. 쉼을 뺀 두 컷에 같은 자막이 두 번 나오면 안 된다.
+    words = [{'id': 'w0', 'start': 5., 'end': 8.5, 'text': ' 필링까지', 'confidence': .9},
+             {'id': 'w1', 'start': 8.5, 'end': 9.5, 'text': ' 들어갔다는데', 'confidence': .9}]
+    asset = _caption_asset(words, [[5., 6.], [7.5, 9.5]])
+    clips = [{'id': 'c1', 'asset_id': 'a', 'start': 4.9, 'end': 6.15}, {'id': 'c2', 'asset_id': 'a', 'start': 7.35, 'end': 9.6}]
+    items = timeline.generate_captions({'clips': clips, 'captions': {'items': []}}, {'a': asset})['items']
+    text = ' '.join(i['text'] for i in items)
+    assert text.count('필링까지') == 1 and text.count('들어갔다는데') == 1
+
+
+def test_captions_without_vad_keep_asr_times():
+    from studio import timeline
+    words = [{'id': 'w0', 'start': 1., 'end': 1.5, 'text': ' 안녕', 'confidence': .9}]
+    asset = _caption_asset(words, [])
+    items = timeline.generate_captions({'clips': [{'id': 'c', 'asset_id': 'a', 'start': 0, 'end': 3}], 'captions': {'items': []}}, {'a': asset})['items']
+    assert items[0]['start'] == 1. and items[0]['end'] >= 1.5
+
+
+def test_transcript_vocabulary_and_retranscribe_rules():
+    from studio import worker
+    state = {'vocabulary': 'CU 소금우유, 크림브륄레\n크림브륄레', 'scene_products': [{'name': '호지차', 'brand': 'GS25', 'variant': ''}]}
+    vocab = worker.transcript_vocabulary(state)
+    assert vocab == 'CU 소금우유, 크림브륄레, 호지차 GS25'
+    done = {'analysis': {'transcribed': True, 'model': 'medium', 'vocabulary': vocab}}
+    assert worker.needs_transcript(done, 'large-v3', vocab)             # 더 정확한 모델이 생겼다
+    assert not worker.needs_transcript(done, 'medium', vocab)           # 같은 모델·같은 단어장
+    assert worker.needs_transcript(done, 'medium', vocab + ', 신상')     # 단어장이 바뀌었다
+    assert not worker.needs_transcript(done, 'large-v3', vocab, ready=False)  # 모델 준비 전엔 기존 인식 사용
+    assert worker.needs_transcript({'analysis': {}}, 'medium', '', ready=False)
