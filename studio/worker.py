@@ -72,7 +72,8 @@ def needs_transcript(asset, model, vocabulary, ready=True):
         return True
     if not ready:
         return False
-    older = MODEL_RANK.get(analysis.get('model') or 'base', 1) < MODEL_RANK.get(model, 3)
+    # 어떤 모델로 인식했는지 기록이 없으면(가져온 대본 등) 모델 때문에 다시 인식하지 않는다.
+    older = bool(analysis.get('model')) and MODEL_RANK.get(analysis['model'], 1) < MODEL_RANK.get(model, 3)
     return older or (analysis.get('vocabulary', '') or '') != vocabulary
 
 
