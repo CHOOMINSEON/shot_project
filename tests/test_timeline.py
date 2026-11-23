@@ -206,3 +206,17 @@ def test_recognizer_repeating_a_word_on_top_of_itself_shows_once():
     asset = _caption_asset(words, [])
     items = timeline.generate_captions({'clips': [{'id': 'c', 'asset_id': 'a', 'start': 0, 'end': 3}], 'captions': {'items': []}}, {'a': asset})['items']
     assert ' '.join(i['text'] for i in items).count('먼저') == 1, items
+
+
+def test_sentence_with_a_swallowed_repeat_gets_a_caption_on_every_voiced_piece():
+    # 1122 원본 133~145초: '필링까지'가 8초짜리 한 단어로 찍혔다. 편집에 남는 목소리 138.4·140.3·142.8초에
+    # 필링까지 / 캐러멜칩이 / 들어갔다는데가 하나씩 나와야 한다(사용자 캡처 0:14: 말하는데 자막이 없었다).
+    asset = {'id': 'a', 'metadata': {'duration': 160, 'has_video': True}, 'analysis': {
+        'words': [{'id': 'a', 'text': ' 필링까지', 'start': 133.24, 'end': 141.58},
+                  {'id': 'b', 'text': ' 캐러멜칩이', 'start': 141.58, 'end': 143.46},
+                  {'id': 'c', 'text': ' 들어갔다는데.', 'start': 143.46, 'end': 144.78}],
+        'speech': [[134.84, 135.03], [135.35, 136.63], [138.42, 139.67], [140.31, 141.56], [142.81, 144.31]]}}
+    placed = {w['text'].strip(' .'): (w['start'], w['end']) for w in t.voice_words(asset)}
+    assert 138.42 <= placed['필링까지'][0] < 139.67
+    assert 140.31 <= placed['캐러멜칩이'][0] < 141.56
+    assert 142.81 <= placed['들어갔다는데'][0] < 144.31

@@ -247,6 +247,17 @@ def voice_words(asset):
             prev_end = end
             continue
 
+        from .guided import SWALLOW
+        spans = [(float(w['start']), float(w['end'])) for w in group]
+        if any(b - a > SWALLOW for a, b in spans):
+            # 한 단어가 반복·재시작을 삼켜 길게 찍힌 문장(1122 '필링까지' 133~141초)은 인식기 시간 비율이 틀린다.
+            # 글자 수 비율로 목소리 구간에 펼친다(사용자 캡처: '필링까지' 다음 '캐러멜칩이'를 말하는 0:14에 자막이 없었다).
+            sizes = [max(1, len(re.sub(r'[^가-힣A-Za-z0-9]', '', w['text']))) for w in group]
+            edge, spans = 0, []
+            for n in sizes:
+                spans.append((start + (end - start) * edge / sum(sizes), start + (end - start) * (edge + n) / sum(sizes)))
+                edge += n
+
         def place(t):
             # 인식기 문장 안의 상대 위치(0~1) → 목소리 구간들을 이어 붙인 시간 → 원본 시간
             left = max(0., min(1., (t - start) / (end - start))) * total
@@ -254,8 +265,8 @@ def voice_words(asset):
                 if left <= b - a + 1e-9 or n == len(pieces) - 1:
                     return n, a + min(left, b - a)
                 left -= b - a
-        for word in group:
-            (n0, a), (n1, b) = place(word['start']), place(word['end'])
+        for word, (w0, w1) in zip(group, spans):
+            (n0, a), (n1, b) = place(w0), place(w1)
             if n1 != n0:
                 # 쉼을 건너는 단어: 가장 많이 걸친 목소리 구간 하나 안에 둔다.
                 best = max(range(n0, n1 + 1), key=lambda n: min(b, pieces[n][1]) - max(a, pieces[n][0]))
