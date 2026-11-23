@@ -57,3 +57,19 @@ def test_captions_use_conti_names():
     text = ' '.join(c['text'] for c in caps)
     assert 'CU 소금우유는' in text and '크림브륄레인데' in text and '호지차' in text
     assert '수유 소금' not in text and '빌렐레' not in text and '호주차' not in text
+
+
+def test_any_other_conti_works_the_same_way_and_lines_not_in_the_conti_stay():
+    # 가나 프리미엄 전용이 아니다: 다른 편의점 신상 콘티에서도 이름·나레이션·반응 단서를 같은 방식으로 찾는다.
+    story = '''편의점 신상 라면 세 개를 다 사 왔어요.
+GS25 마라탕면은 국물이 진하다는데, [매운 정도 실제 반응].
+세븐일레븐 짜장볶이는 떡이 들어갔는데, [떡 식감 실제 반응].'''
+    spoken = [' 먼저', ' 지에스', ' 마라탄면은', ' 국물이', ' 진하대요.', ' 와', ' 진짜', ' 맵다.', ' 저', ' 매운', ' 거', ' 못', ' 먹는데',
+              ' 다음은', ' 세븐일레븐', ' 짜장보끼는', ' 떡이', ' 쫄깃해요.']
+    ws = [{'id': f'w{i}', 'start': i * .5, 'end': i * .5 + .4, 'text': t} for i, t in enumerate(spoken)]
+    out = conti.correct_words(ws, story)
+    assert [w['text'] for w in out if w.get('asr_text')] == [' GS25', ' 마라탕면은', ' 짜장볶이는']   # '지에스 마라탄면은' → 'GS25 마라탕면은'
+    assert len(out) == len(spoken)   # 콘티에 없는 리액션('와 진짜 맵다', '저 매운 거 못 먹는데')도 그대로 남는다
+    said, seconds = conti.narration_lines(story, ws)
+    assert said == ['편의점 신상 라면 세 개를 다 사 왔어요.'] and seconds > 0
+    assert '매운' in conti.hints(story)['마라탕면'] and '식감' in conti.hints(story)['짜장볶이']
