@@ -190,6 +190,22 @@ def build(asset,check=lambda:None,progress=lambda value,message:None,fast=False)
         conn.close()
 
 
+def add_motion(asset_id,rows):
+    """장면마다 '움직임'(앞뒤 0.5~1초 장면과 작은 흑백 썸네일 차이)을 붙인다. 낮을수록 손·상자가 멈춘 깔끔한 장면.
+
+    사용자 직접 편집본 1123과 대조: 이전 자동 편집이 고른 디테일 컷 중 상자를 옮기던 중·낱개로 손을 뻗던 중인
+    흔들린 장면은 움직임 상위 20~35%였고, 사용자가 고른 상자 앞면·펼친 낱개 장면은 하위 10~25%였다.
+    """
+    from PIL import Image
+    folder=directory(asset_id);small=[]
+    for r in rows:
+        try:small.append(np.asarray(Image.open(folder/r['thumbnail']).convert('L').resize((32,56)),dtype=np.float32)/255)
+        except (OSError,KeyError,ValueError):small.append(None)
+    for i,r in enumerate(rows):
+        near=[float(np.abs(small[i]-small[j]).mean()) for j in (i-1,i+1) if 0<=j<len(rows) and small[i] is not None and small[j] is not None]
+        if near:r['motion']=round(sum(near)/len(near),4)
+
+
 def protected(asset_id):
     """Conservative food-shot protection, including intervals with no speech."""
     from .timeline import merge_intervals

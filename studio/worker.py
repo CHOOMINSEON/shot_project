@@ -600,8 +600,15 @@ def guided_edit(ident, payload):
         before = json.loads(snapshot['state'])
         scenes = scene_search.Search(assets, before.get('scene_products', []), lambda: check_cancel(ident), '')
         frames_by_asset = {}
-        for row in scenes.records:
-            frames_by_asset.setdefault(row['asset_id'], []).append(row)
+        for n, row in enumerate(scenes.records):
+            # 장면 그림 특징(CLIP)도 같이 넘긴다: 비슷한 장면을 두 번 고르지 않게(원본 기록은 건드리지 않게 복사)
+            vec = scenes.vectors[n] if n < len(scenes.vectors) else None
+            frames_by_asset.setdefault(row['asset_id'], []).append({**row, 'vec': vec} if vec is not None else row)
+        for asset_id, rows in frames_by_asset.items():
+            try:
+                scene_index.add_motion(asset_id, sorted(rows, key=lambda r: r['start']))   # 디테일 컷은 흔들리지 않은 장면을 고른다
+            except Exception:
+                pass
         style = payload['style']
         detected = None
         if style == 'auto':

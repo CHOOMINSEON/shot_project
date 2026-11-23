@@ -1100,8 +1100,11 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             if k in names and not u.get('product'):
                 u['auto_product'] = names[k][0]
     broll = _detail_shots(assets, frames_by_asset, evidence, names) if rules.get('bites') and not scene_mode else []
+    order = [names[k][0] for k in sorted(names)]
+    # 후 나레이션 자리가 있으면 제품별 첫 컷(상자)을 그 자리에 쓰고, 나머지를 설명 발화에 쓴다(한 컷은 한 번만).
+    story = _storyboard(broll, order, _detail_wants(kept), 1) if broll and rules.get('post_narration') else None
     # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
-    slot = _opening_slot(broll, [names[k][0] for k in sorted(names)], fps) if rules.get('post_narration') and broll and not scene_mode else []
+    slot = _opening_slot(broll, order, fps, story=story) if rules.get('post_narration') and broll and not scene_mode else []
     if slot:
         notes.append(f'첫 {sum(u["end"] - u["start"] for u in slot):.0f}초(원본 기준)는 후 나레이션 자리예요: 제품 모아 보여 주기·상자·단면 컷 {len(slot)}개(원본 소리). 캡컷에서 나레이션을 녹음해 얹으세요.')
     if not slot and rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
@@ -1110,10 +1113,13 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             kept[0]['montage'] = pieces
             notes.append(f'첫 멘트 아래에 제품 여러 개를 들어 보이는 컷 {len(pieces)}개를 이어 붙였어요(직접 편집본 1123 방식).')
     if broll:
-        laid = _overlay_details([u for u in kept if not u.get('montage')], broll)
+        laid = _overlay_details([u for u in kept if not u.get('montage')], broll, story)
         if laid:
-            notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품은 말한 이름과 포장 글자로 맞췄어요.')
+            notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품마다 촬영 구간 처음·가운데·끝에서 서로 다른 장면으로 골랐어요.')
     kept = slot + kept
+    again = _drop_repeats(kept)
+    if again:
+        notes.append(f'같은 장면이 두 번 나오지 않게 겹치는 얹은 화면 {again}개를 뺐어요(그 자리는 원래 화면).')
     kept = _cut_pauses(kept)   # 문장 안 긴 쉼 줄이기(해석 영상은 모든 쉼, 그 외는 0.5초 넘는 쉼)
     clips = _merge_clips(kept, assets, rules, fps)
     overlays = []
@@ -1398,6 +1404,18 @@ def _detail_shots(assets, frames_by_asset, evidence, names=None):
             if p == q and rows[j]['start'] - rows[i]['start'] <= 25:
                 for m in range(i + 1, j):
                     labels[m] = labels[m] or p
+        # 상자를 연 뒤 낱개를 펼친 장면엔 글자가 거의 없다(1123: 크림브륄레 160초 앞면 → 166초 연 상자 → 188초 낱개).
+        # 그래서 한 제품의 마지막 근거 뒤, 다음 제품 근거 3초 전까지(최대 40초) 글자가 거의 없는 장면은 같은 제품으로 본다.
+        known = [(i, p) for i, p in enumerate(labels) if p]
+        for n, (i, p) in enumerate(known):
+            if p == MULTI:
+                continue
+            stop = rows[known[n + 1][0]]['start'] - 3 if n + 1 < len(known) else float('inf')
+            for m in range(i + 1, len(rows)):
+                if labels[m] or rows[m]['start'] > min(stop, rows[i]['start'] + 40) or rows[m]['shot'] != rows[i]['shot']:
+                    break
+                if len(rows[m].get('ocr') or []) <= 2:   # 글자가 여럿 보이면 상자 여러 개일 수 있어 비워 둔다
+                    labels[m] = p
         i = 0
         while i < len(rows):
             j = i
@@ -1411,8 +1429,11 @@ def _detail_shots(assets, frames_by_asset, evidence, names=None):
                     for tag, v in (r.get('tags') or {}).items():
                         tags[tag] = max(tags.get(tag, 0), v)
                 role = next((r for r in ['crosssection', 'opening', 'packaging', 'cutting'] if r in tags or (r == 'crosssection' and 'cream' in tags)), 'packaging')
+                moving = [r['motion'] for r in rows[i:j + 1] if r.get('motion') is not None]
+                vecs = [r['vec'] for r in rows[i:j + 1] if r.get('vec') is not None]
                 shots.append({'asset_id': a['id'], 'start': start, 'end': end, 'role': role, 'lineup': False,
-                              'product': labels[i], 'used': False})
+                              'product': labels[i], 'used': False, 'motion': sum(moving) / len(moving) if moving else None,
+                              'vec': _unit_vec(sum(vecs)) if vecs else None})
             i = j + 1
         # 여러 제품을 한꺼번에 들어 보이는 순간(CLIP '비교' 태그) → 첫 장면 후보. 3초 안에 이어지면 한 장면.
         moments = []
@@ -1422,54 +1443,131 @@ def _detail_shots(assets, frames_by_asset, evidence, names=None):
                     moments[-1][1] = r['end']
                 else:
                     moments.append([r['start'], r['end']])
+        motion = lambda m0, m1: ([r['motion'] for r in rows if m0 <= r['start'] <= m1 and r.get('motion') is not None] or [None])
         shots += [{'asset_id': a['id'], 'start': m0 - .5, 'end': m1 + .5, 'role': 'packaging', 'lineup': True,
-                   'product': None, 'used': False} for m0, m1 in moments]
+                   'product': None, 'used': False, 'motion': min(motion(m0, m1), key=lambda x: (x is None, x))} for m0, m1 in moments]
     return sorted(shots, key=lambda s: (s['asset_id'], s['start']))
 
 
-def _overlay_details(kept, shots):
-    """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 점수·결론·시식 직후 반응은 얼굴."""
-    count = 0
+LOOK_GAP = 6.       # 같은 제품 디테일 컷끼리 최소 간격(초). 같은 상자를 같은 자세로 든 장면이 두 번 나오지 않게
+LINEUP_GAP = 15.    # 제품 여러 개를 함께 든 컷끼리 최소 간격(초)
+REPEAT_NEAR = 4.    # 이미 화면에 나온 원본 구간에서 이만큼 안쪽이면 같은 장면으로 본다
+MAX_LOOKS = 3       # 제품 하나에 디테일 컷 최대 3개(1123: 앞면 → 연 상자 → 펼친 낱개). 더 쓰면 비슷한 장면이 반복된다
+
+
+LOOK_SIM = .88      # 장면 그림 특징 유사도가 이 이상이면 같은 장면(1123 직접 편집본이 한 제품에 쓴 컷끼리는 최대 .85)
+
+
+def _unit_vec(v):
+    import numpy as np
+    v = np.asarray(v, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n else v
+
+
+def _apart(a, b, gap):
+    if a.get('vec') is not None and b.get('vec') is not None and float(a['vec'] @ b['vec']) >= LOOK_SIM:
+        return False   # 시간은 떨어져도 그림이 같은 장면(예: 펼친 낱개를 두 번)
+    return a['asset_id'] != b['asset_id'] or a['start'] - b['end'] >= gap or b['start'] - a['end'] >= gap
+
+
+def _spread(pool, k, gap):
+    """후보 컷 k개를 촬영 순서 전체에 고르게 고른다(서로 gap초 이상 떨어지게).
+
+    사용자 직접 편집본 1123(원본 011213과 대조): 제품마다 디테일 영상 구간 처음·가운데·끝에서 한 컷씩
+    (소금우유 69~104초 구간 → 68.6·76.6·96.8초, 호지차 0~62초 → 16.6·28·51.8초) 앞면 → 연 상자 → 펼친 낱개 순으로 썼다.
+    이전 자동 편집은 구간 앞쪽 컷만 연달아 골라 같은 상자 앞면이 2~3번 나왔다(사용자: '똑같은 장면이 2번 나와').
+    """
+    pool = sorted(pool, key=lambda s: (s['asset_id'], s['start']))
+    picked = []
+    for j in range(min(k, len(pool))):
+        # 구간을 k등분해 각 칸에서 가장 덜 흔들린 장면(움직임 값이 없으면 칸 가운데)을 고른다
+        lo, hi = j * len(pool) / k, (j + 1) * len(pool) / k
+        want = (lo + hi) / 2
+        def rank(i):
+            inside = lo <= i + .5 <= hi
+            m = pool[i].get('motion')
+            return (not inside, round(m / .03) if inside and m is not None else 0, abs(i + .5 - want))
+        for i in sorted(range(len(pool)), key=rank):
+            if pool[i] not in picked and all(_apart(pool[i], q, gap) for q in picked):
+                picked.append(pool[i])
+                break
+    return sorted(picked, key=lambda s: (s['asset_id'], s['start']))
+
+
+def _detail_wants(kept):
+    """디테일 컷을 얹을 발화를 제품별로 모은다(소개·설명·맛 평가 앞부분). 점수·결론·시식 직후 반응은 얼굴."""
+    wants = {}
     for u, k in _product_blocks(kept):
         name = (u.get('product') or {}).get('name') or u.get('auto_product')
         labels = set(u['labels'])
-        if u.get('overlay') or u.get('after_bite') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
+        if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
             continue
-        talk = u['end'] - u['start']
-        if talk < 1.6:
+        if u['end'] - u['start'] - .8 < DETAIL_SHOW[0]:
             continue
-        pool = [s for s in shots if not s['used'] and name and s['product'] == name]
-        if not pool:
-            continue
-        # 설명(구성·속·단면) 말에는 개봉·단면 컷, 소개에는 포장 컷을 먼저
-        want = ['crosssection', 'opening'] if labels & {'describe', 'taste', 'pro', 'con'} else ['packaging', 'opening']
-        pool.sort(key=lambda s: (s['role'] not in want, s['start']))
-        s = pool[0]
-        take = min(DETAIL_SHOW[1], s['end'] - s['start'], talk - .8)
-        if take < DETAIL_SHOW[0]:
-            continue
-        mid = (s['start'] + s['end'] - take) / 2
-        u['overlay'] = {'start': mid, 'end': mid + take, 'role': s['role'], 'asset_id': s['asset_id']}
-        s['used'] = True
-        count += 1
+        wants.setdefault(name, []).append(u)
+    return wants
+
+
+def _storyboard(shots, names, wants, reserve=0):
+    """제품마다 쓸 디테일 컷을 미리 정한다: 필요한 수(+첫 장면 자리)만큼 그 제품 촬영 구간 전체에 고르게."""
+    story = {}
+    for n in names:
+        k = min(MAX_LOOKS, len(wants.get(n, [])) + reserve)
+        by = {}
+        for s in shots:
+            if not s['lineup'] and s['product'] == n:
+                by.setdefault(s['asset_id'], []).append(s)
+        picked = []
+        # 그 제품을 가장 오래 찍은 디테일 영상에서 먼저 고른다(1123: 제품별 컷은 전부 상자 하나씩 찍은 011213에서).
+        for pool in sorted(by.values(), key=len, reverse=True):
+            picked += _spread(pool, k - len(picked), LOOK_GAP)
+        story[n] = picked
+    return story
+
+
+def _overlay_details(kept, shots, story=None):
+    """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 한 컷은 한 번만 쓴다."""
+    wants = _detail_wants(kept)
+    story = story if story is not None else _storyboard(shots, list(wants), wants)
+    count = 0
+    for name, units in wants.items():
+        for u in units:
+            looks = [s for s in story.get(name, []) if not s['used']]
+            if not looks:
+                break
+            s = looks[0]
+            take = min(DETAIL_SHOW[1], s['end'] - s['start'], u['end'] - u['start'] - .8)
+            if take < DETAIL_SHOW[0]:
+                continue
+            mid = (s['start'] + s['end'] - take) / 2
+            u['overlay'] = {'start': mid, 'end': mid + take, 'role': s['role'], 'asset_id': s['asset_id']}
+            s['used'] = True
+            count += 1
     return count
 
 
-def _opening_slot(shots, order, fps=30, length=11., piece=.9):
+def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
     """후 나레이션 자리: 첫 약 10초(원본 기준 11초 = 1.3배속 후 약 8.5초)를 사용자 편집본 1123 첫 부분처럼 채운다.
 
     1123 첫 10초 실측: 제품 4개를 들고 있는 컷 → 제품별 상자 컷(테이블) → 단면 컷 → 다시 들고 있는 컷, 한 컷 0.3~1초(배속 후).
     소리는 각 컷 원본 소리(말 없음). 캡컷에서 후킹 나레이션을 녹음해 얹는다. 말하는 원본은 쓰지 않는다(첫 문장이 바로 나오지 않게).
+    같은 장면은 두 번 쓰지 않는다: 여러 제품 컷은 촬영 시간 전체에서 15초 이상 떨어진 것, 단면 컷은 영상 하나에 하나,
+    제품 상자 컷은 그 제품 디테일 컷 계획(story)의 첫 컷(뒤에 나오는 설명 컷과 다른 장면).
     """
     step = 1 / fps
     snap = lambda x: round(x / step) * step
-    lineup = [s for s in shots if s['lineup'] and not s['used']]
-    by = {}
-    for s in shots:
-        if not s['used'] and s['product'] and s['product'] != MULTI and s['role'] in ('packaging', 'opening'):
-            by.setdefault(s['product'], []).append(s)
-    boxes = {n: v[len(v) // 2] for n, v in by.items()}   # 제품 구간 가운데(경계 쪽은 옆 제품 상자일 수 있음)
-    cuts = [s for s in shots if not s['used'] and not s['lineup'] and s['role'] == 'crosssection']
+    lineup = _spread([s for s in shots if s['lineup'] and not s['used']], 4, LINEUP_GAP)
+    if story is None:
+        story = _storyboard(shots, order, {}, 1)
+    boxes = {n: v[0] for n, v in story.items() if v and not v[0]['used']}
+    cuts, seen = [], set()
+    for s in sorted((s for s in shots if not s['used'] and not s['lineup'] and s['role'] == 'crosssection'), key=lambda s: (s['asset_id'], s['start'])):
+        if s['asset_id'] not in seen and not any(s is v for vs in story.values() for v in vs):
+            same = [c for c in shots if c['asset_id'] == s['asset_id'] and c['role'] == 'crosssection' and not c['lineup'] and not c['used']]
+            mid = len(same) // 2   # 움직임 값이 없으면 단면 영상 가운데(자르는 손이 지나간 뒤 단면이 보이는 쪽)
+            cuts.append(min(same, key=lambda c: (c.get('motion') is None, c.get('motion') or 0, abs(same.index(c) - mid))))   # 가장 덜 흔들린 단면 컷
+            seen.add(s['asset_id'])
     picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:4]
     units, total = [], 0.
     for s in picked:
@@ -1487,6 +1585,36 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9):
     return units if len(units) >= 3 else []
 
 
+def _drop_repeats(kept):
+    """같은 원본 장면이 두 번 보이지 않게, 얹은 화면(시식·디테일·단면) 중 이미 보인 화면 구간 근처(4초)는 뺀다(얼굴 화면으로 둔다).
+
+    예시 영상 피드백(2026-11-23 '똑같은 장면이 2번 나와'): 1028초 먹는 화면을 한 번 얹고, 뒤에서 1024초 먹는 화면을
+    또 얹었다. 화면에 나오는 원본 구간을 모두 모아, 앞에서 이미 나온 장면과 4초 안쪽이면 다시 얹지 않는다.
+    """
+    # 얹은 화면과 겹치는 단독 화면 구간(디테일 영상이 따로 남은 것)은 뺀다: 얹은 쪽이 제품 설명과 맞춰져 있다.
+    laid = [(u['overlay'].get('asset_id', u['asset_id']), u['overlay']['start'], u['overlay']['end']) for u in kept if u.get('overlay')]
+    laid += [(u['asset_id'], u['start'], u['end']) for u in kept if u.get('opening_slot')]
+    kept[:] = [u for u in kept if u['kind'] != 'visual' or u.get('opening_slot')
+               or not any(a == u['asset_id'] and u['start'] < y and u['end'] > x for a, x, y in laid)]
+    # 말하는 얼굴 화면(원래 화면)은 비교하지 않는다: 먹고 나서 바로 말하는 장면은 같은 카메라가 이어진 것이다.
+    shown = [(u['asset_id'], u['start'], u['end']) for u in kept if u['kind'] == 'visual']
+    for u in kept:
+        for p in u.get('montage') or []:
+            shown.append((p[4] if len(p) > 4 else u['asset_id'], p[2], p[2] + p[1] - p[0]))
+    dropped = 0
+    for u in kept:
+        o = u.get('overlay')
+        if not o:
+            continue
+        aid = o.get('asset_id', u['asset_id'])
+        if any(a == aid and o['start'] - y < REPEAT_NEAR and x - o['end'] < REPEAT_NEAR for a, x, y in shown):
+            u.pop('overlay')
+            dropped += 1
+            continue
+        shown.append((aid, o['start'], o['end']))
+    return dropped
+
+
 def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):
     """첫 멘트 아래 제품 포장·들어 보이기 컷을 0.8~1.2초씩 잇는다(얼굴은 첫 멘트 끝 0.6초에 돌아온다).
 
@@ -1497,7 +1625,7 @@ def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):
     if length < 2 * piece[0]:
         return []
     # 첫 멘트는 보통 특정 제품 이야기라, 여러 제품을 함께 들어 보이는 컷만 쓴다(한 제품 포장 컷은 다른 제품을 말할 때 섞일 수 있음).
-    picked = sorted((s for s in shots if not s['used'] and s['lineup']), key=lambda s: (s['asset_id'], s['start']))
+    picked = _spread([s for s in shots if not s['used'] and s['lineup']], 6, LINEUP_GAP)   # 같은 순간을 두 번 쓰지 않게
     step = 1 / fps
     snap = lambda x: round(x / step) * step
     pieces, t = [], snap(hook['start'])

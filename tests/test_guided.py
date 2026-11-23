@@ -799,3 +799,31 @@ def test_post_narration_marker_reserves_opening_with_product_shots():
             assert any(19 <= c['start'] <= 22 for c in opening) and any(39 <= c['start'] <= 42 for c in opening)
         else:
             assert result['clips'][0]['asset_id'] == 'v'
+
+
+def test_same_scene_is_never_shown_twice_and_detail_shots_spread_over_the_product_take():
+    # 사용자 피드백 '똑같은 장면이 2번 나와': 같은 상자 앞면이 첫 장면과 설명 위에 반복됐다.
+    # 직접 편집본 1123: 제품 디테일 영상 구간 처음·가운데·끝에서 한 컷씩(앞면 → 연 상자 → 펼친 낱개).
+    words = [w(1, ' 먼저 소금우유는 밀크초콜릿이에요.', 10, 13), w(2, ' 겉은 다크초콜릿이고 안에는 캐러멜칩이 들어갔대요.', 14, 18),
+             w(3, ' 속에는 소금 우유 크림이 들어가 있어요.', 19, 23), w(4, ' 이건 8점 드릴게요.', 30, 32),
+             w(5, ' 다음은 호지차예요.', 40, 42), w(6, ' 이건 6점 드릴게요.', 50, 52)]
+    v = asset(words, 60)
+    d = asset([], 80, name='디테일.mp4', ident='d')
+    d['analysis']['speech'] = []
+    def row(i, t, text, tags):
+        r = frame(i, t, t + .5, tags, shot=1)
+        r['ocr'] = [{'text': text}]
+        return r
+    detail = [row(i, 1 + .5 * i, '', {'comparison': .3}) for i in range(4)] + \
+             [row(100 + i, 10 + .5 * i, '소금우유', {'packaging': .3}) for i in range(60)] + \
+             [row(200 + i, 50 + .5 * i, '호지지', {'packaging': .3}) for i in range(8)]
+    rules = guided.parse_guideline(default_guideline() + '\n후 나레이션 포함', 'oneshot')
+    result = guided.plan([v, d], rules, {'v': [], 'd': detail}, {})
+    shown = [(c.get('visual_start', c['start']), c.get('visual_end', c['end'])) for c in result['clips']
+             if c.get('visual_asset_id', c['asset_id']) == 'd']
+    salt = sorted(a for a, b in shown if 10 <= a < 40)
+    assert len(salt) >= 3, shown
+    assert all(b - a >= guided.LOOK_GAP for a, b in zip(salt, salt[1:])), salt          # 같은 상자 장면 반복 없음
+    assert salt[0] < 18 and salt[-1] > 30, salt                                        # 구간 처음부터 끝까지 고르게
+    for i, (a, b) in enumerate(shown):
+        assert not any(x < b and y > a for x, y in shown[i + 1:]), shown               # 같은 원본 구간 두 번 없음
