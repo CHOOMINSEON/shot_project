@@ -13,6 +13,9 @@ DIGIT = '영일이삼사오육칠팔구'
 BRANDS = ('세븐일레븐', '이마트24', '이마트', 'GS25', 'GS', 'CU', '미니스톱', '편의점')
 JOSA = ('부터는', '이라서', '인데요', '인데', '에는', '이랑', '처럼', '보다', '까지', '부터', '이라', '이에요', '예요', '은', '는', '이', '가',
         '도', '의', '에', '를', '을', '랑', '와', '과')
+COMMON = {'이거', '이건', '이게', '저는', '제가', '오늘', '오늘은', '먼저', '다음', '다음은', '마지막', '마지막은', '여러분', '여러분은', '사실',
+          '진짜', '그리고', '근데', '처음', '패키지', '가격', '가격은', '맛은', '맛', '국물', '식감', '향', '포장', '여기', '여기는', '이번',
+          '이번엔', '편의점', '구성', '양', '양은', '전체', '첫', '두', '세', '네', '총평', '결론'}
 SENSE = {'향', '꿀', '배', '짠', '단', '쓴', '칩'}   # 대괄호 단서 중 한 글자라도 남길 맛·향 낱말
 CHO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ'
 JUNG = 'ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ'
@@ -85,7 +88,11 @@ def lines(text):
 
 
 def names(text):
-    """콘티에서 편의점·제품 이름. 편의점 이름 바로 뒤 단어를 제품 이름으로 본다('CU 소금우유도' → 소금우유)."""
+    """콘티에서 가게·브랜드·제품 이름.
+
+    - 편의점 이름 바로 뒤 단어 = 제품('CU 소금우유도' → CU + 소금우유)
+    - 그 밖의 콘티: 줄 맨 앞 '○○ △△은/는/도' 주어 묶음('롬앤 쥬시래스팅틴트는' → 롬앤 + 쥬시래스팅틴트), 따옴표 안 말, 영문 이름
+    """
     brands, products, pairs = [], [], []
     for line in lines(text):
         tokens = line['text'].split()
@@ -101,6 +108,32 @@ def names(text):
                     if len(product) >= 2 and product not in BRANDS and not re.search(r'(편의점|거|것)$', product):
                         products.append(product)
                         pairs.append((brand, product))
+        if any(b for b, _ in pairs if any(b == re.sub(r'[^\w&]', '', t) for t in tokens)):
+            continue
+        # 편의점 상품이 아닌 콘티(맛집·화장품·카페 …): 줄 맨 앞 '○○ △△은/는/도' 주어 묶음을 가게·제품 이름으로 본다.
+        # ('성수 감자탕집은' → 성수 + 감자탕집, '롬앤 쥬시래스팅틴트는' → 롬앤 + 쥬시래스팅틴트). 따옴표 안 말과 영문 이름도.
+        head = []
+        for tok in tokens[:3]:
+            lead, core, tail = _core(re.sub(r'[^\w&\s]', '', tok))
+            if len(core) < 2 or core in COMMON or not re.fullmatch(r'[\w&]+', core):
+                break
+            head.append(core)
+            if re.match(r'(은|는|도|부터는)$', tail):
+                if len(head) >= 2:
+                    brands.append(head[0])
+                    products.append(head[-1])
+                    pairs.append((head[0], head[-1]))
+                else:
+                    products.append(head[0])
+                break
+        else:
+            head = []
+        for quoted in re.findall(r"['\"‘“「]([^'\"’”」]{2,20})['\"’”」]", line['raw']):
+            products.append(quoted.strip())
+        for tok in tokens:
+            core = _core(re.sub(r'[^\w&\s]', '', tok))[1]
+            if re.search(r'[A-Za-z]', core) and len(core) >= 2 and core not in brands + products:
+                brands.append(core)
     return {'brands': list(dict.fromkeys(brands)), 'products': list(dict.fromkeys(products)), 'pairs': list(dict.fromkeys(pairs))}
 
 
@@ -123,24 +156,35 @@ def correct_words(words, text):
     before = {p: b for b, p in found['pairs']}
     out = [dict(w) for w in words]
     cores = [_core(w.get('text', '')) for w in out]
-    for i, (lead, core, tail) in enumerate(cores):
-        if len(core) < 2 or not re.fullmatch(r'[가-힣]+', core):
-            continue
+    def match(core):
+        """(점수, 이름) 또는 None. 이미 콘티 이름이면 'same'."""
         best = None
         for term in terms:
             say = reading(term)
-            if core == term or core == say:
-                best = None
-                break
+            if core == term:
+                return 'same'
+            if core == say:
+                return (1., term) if re.search(r'[A-Za-z0-9&]', term) else 'same'   # '씨유' → 'CU'
             score = similar(core, say) if abs(len(core) - len(say)) <= 1 else 0.
             if len(core) >= 3 and len(say) >= len(core) + 1:
                 score = max(score, similar(core, say[-len(core):]) - .05)   # 긴 이름 뒷부분만 들림
             if score >= .7 and (best is None or score > best[0]):
                 best = (score, term)
-        if best:
+        return best
+
+    for i, (lead, core, tail) in enumerate(cores):
+        punct = re.search(r'[.,!?…~]*$', tail)[0]
+        whole = core + tail[:len(tail) - len(punct)]
+        # 조사를 뗀 말과 통째 말 둘 다 본다('무하과' → '무화과'. '과'는 조사가 아니라 이름의 일부)
+        options = [(match(c), c, t) for c, t in ((core, tail), (whole, punct)) if len(c) >= 2 and re.fullmatch(r'[가-힣]+', c)]
+        if any(m == 'same' for m, _, _ in options):
+            continue
+        options = [o for o in options if o[0]]
+        if options:
+            (score, term), c, t = max(options, key=lambda o: o[0][0])
             out[i]['asr_text'] = out[i].get('asr_text', out[i]['text'])
-            out[i]['text'] = lead + best[1] + tail
-            cores[i] = (lead, best[1], tail)
+            out[i]['text'] = lead + term + t
+            cores[i] = (lead, term, t)
     after = {b: p for b, p in found['pairs']}
     for i in range(1, len(out)):
         # 편의점 이름 바로 뒤 단어는 콘티에서 그 편의점 제품일 가능성이 커서 기준을 낮춘다('세븐일레븐의 빌렐레인데' → 크림브륄레)
@@ -163,6 +207,10 @@ def correct_words(words, text):
         brand = before.get(product)
         if not brand or core == brand or not re.fullmatch(r'[가-힣]{1,3}', core or ''):
             continue
+        punct = re.search(r'[.,!?…~]*$', tail)[0]
+        whole = core + tail[:len(tail) - len(punct)]
+        if re.fullmatch(r'[가-힣]{1,4}', whole) and similar(whole, reading(brand)) > similar(core, reading(brand)):
+            core, tail = whole, punct   # '삼씨이' 전체가 '3CE'(삼씨이)
         if similar(core, reading(brand)) >= .45:
             out[i]['asr_text'] = out[i].get('asr_text', out[i]['text'])
             out[i]['text'] = lead + brand + tail

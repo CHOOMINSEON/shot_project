@@ -73,3 +73,20 @@ GS25 마라탕면은 국물이 진하다는데, [매운 정도 실제 반응].
     said, seconds = conti.narration_lines(story, ws)
     assert said == ['편의점 신상 라면 세 개를 다 사 왔어요.'] and seconds > 0
     assert '매운' in conti.hints(story)['마라탕면'] and '식감' in conti.hints(story)['짜장볶이']
+
+
+def test_conti_that_is_not_about_convenience_store_snacks_also_fixes_names():
+    # 맛집·화장품처럼 편의점 이름이 없는 콘티: 줄 맨 앞 '○○ △△은/는/도', 따옴표 안 말, 영문 이름을 이름으로 본다.
+    story = '''성수동 줄 서는 감자탕집 다녀왔어요.
+성수 감자탕집은 뼈가 엄청 크다는데, [뼈 크기 실제 반응].
+롬앤 쥬시래스팅틴트는 '무화과' 색이 제일 인기래요, [발색 실제 반응].
+3CE 벨벳틴트도 발라봤는데 [지속력 실제 반응].'''
+    found = conti.names(story)
+    assert ('롬앤', '쥬시래스팅틴트') in found['pairs'] and ('3CE', '벨벳틴트') in found['pairs'] and '무화과' in found['products']
+    spoken = [' 성수', ' 감자탕집은', ' 뼈가', ' 롬엔', ' 쥬시래스팅팅트는', ' 무하과', ' 색이', ' 삼씨이', ' 벨벳틴트도', ' 와', ' 진짜', ' 크다.']
+    ws = [{'id': f'w{i}', 'start': i * .5, 'end': i * .5 + .4, 'text': t} for i, t in enumerate(spoken)]
+    out = conti.correct_words(ws, story)
+    assert {w['asr_text']: w['text'] for w in out if w.get('asr_text')} == {
+        ' 롬엔': ' 롬앤', ' 쥬시래스팅팅트는': ' 쥬시래스팅틴트는', ' 무하과': ' 무화과', ' 삼씨이': ' 3CE'}
+    assert [w['text'] for w in out][-3:] == [' 와', ' 진짜', ' 크다.']   # 콘티에 없는 리액션은 그대로
+    assert conti.hints(story)['쥬시래스팅틴트'] == ['발색']
