@@ -166,3 +166,57 @@ def test_transcript_vocabulary_and_retranscribe_rules():
     assert worker.needs_transcript(done, 'medium', vocab + ', 신상')     # 단어장이 바뀌었다
     assert not worker.needs_transcript(done, 'large-v3', vocab, ready=False)  # 모델 준비 전엔 기존 인식 사용
     assert worker.needs_transcript({'analysis': {}}, 'medium', '', ready=False)
+
+
+def test_real_1122_project_captions_have_each_word_once_and_old_captions_are_rebuilt():
+    # 사용자 PC의 '1122 가나 프리미엄' 실제 값: 0.27초 몽타주 컷 4개 + 쉼을 뺀 컷들, 8.3초로 늘어진 '필링까지'.
+    # 이전 버전이 저장한 자막은 '먼저'가 4번, '필링까지'가 3번이었다(사용자: '먼저를 무슨 4번이나').
+    from studio import timeline
+    words = [{'id': 'w2', 'start': 120.94, 'end': 122.58, 'text': ' 먼저', 'confidence': .69},
+             {'id': 'w3', 'start': 122.58, 'end': 122.90, 'text': ' 수유', 'confidence': .65},
+             {'id': 'w4', 'start': 122.90, 'end': 124.62, 'text': ' 소금우유는', 'confidence': .81},
+             {'id': 'w5', 'start': 126.63, 'end': 127.51, 'text': ' 밀크초콜릿에', 'confidence': .81},
+             {'id': 'w6', 'start': 129.11, 'end': 131.61, 'text': ' 소금우유', 'confidence': .91},
+             {'id': 'w7', 'start': 133.24, 'end': 141.58, 'text': ' 필링까지', 'confidence': .85},
+             {'id': 'w8', 'start': 141.58, 'end': 143.0, 'text': ' 캐러멜칩이', 'confidence': .9},
+             {'id': 'w9', 'start': 143.0, 'end': 144.4, 'text': ' 들어갔다는데', 'confidence': .9}]
+    speech = [[121.336, 122.008], [122.232, 123.832], [126.648, 127.96], [130.36, 132.408], [134.84, 135.032],
+              [135.352, 136.632], [138.4, 139.7], [140.3, 141.6], [142.7, 144.4]]
+    asset = _caption_asset(words, speech)
+    cuts = [(121.2, 121.467), (121.467, 121.733), (121.733, 122.0), (122.0, 122.267), (122.267, 123.133), (123.133, 124.033),
+            (126.467, 128.167), (134.667, 136.833), (138.3, 139.867), (140.167, 141.767), (142.667, 144.533)]
+    clips = [{'id': f'c{i}', 'asset_id': 'a', 'start': a, 'end': b} for i, (a, b) in enumerate(cuts)]
+    old = [{'id': f'old{i}', 'start': i * .27, 'end': i * .27 + .26, 'text': '먼저', 'source_key': 'a:w2:w2', 'edited': False} for i in range(4)]
+    state = {'clips': clips, 'captions': {'items': old, 'signature': timeline.signature({'clips': clips})}}
+    assert timeline.stale_captions(state)
+    caps = timeline.sync_captions(state, state, {'a': asset})
+    assert not timeline.stale_captions({'captions': caps})
+    texts = [c['text'] for c in caps['items']]
+    joined = ' '.join(texts)
+    for word in ('먼저', '소금우유는', '밀크초콜릿에', '필링까지', '캐러멜칩이', '들어갔다는데'):
+        assert joined.count(word) == 1, texts
+    assert all(a['end'] <= b['start'] + 1e-6 for a, b in zip(caps['items'], caps['items'][1:]))   # 겹치는 자막 없음
+    assert all(a != b for a, b in zip(texts, texts[1:]))
+
+
+def test_recognizer_repeating_a_word_on_top_of_itself_shows_once():
+    from studio import timeline
+    words = [{'id': f'w{i}', 'start': 1. + i * .05, 'end': 1.4 + i * .05, 'text': ' 먼저', 'confidence': .5} for i in range(3)] + \
+            [{'id': 'w9', 'start': 1.6, 'end': 2.2, 'text': ' 소금우유는', 'confidence': .9}]
+    asset = _caption_asset(words, [])
+    items = timeline.generate_captions({'clips': [{'id': 'c', 'asset_id': 'a', 'start': 0, 'end': 3}], 'captions': {'items': []}}, {'a': asset})['items']
+    assert ' '.join(i['text'] for i in items).count('먼저') == 1, items
+
+
+def test_sentence_with_a_swallowed_repeat_gets_a_caption_on_every_voiced_piece():
+    # 1122 원본 133~145초: '필링까지'가 8초짜리 한 단어로 찍혔다. 편집에 남는 목소리 138.4·140.3·142.8초에
+    # 필링까지 / 캐러멜칩이 / 들어갔다는데가 하나씩 나와야 한다(사용자 캡처 0:14: 말하는데 자막이 없었다).
+    asset = {'id': 'a', 'metadata': {'duration': 160, 'has_video': True}, 'analysis': {
+        'words': [{'id': 'a', 'text': ' 필링까지', 'start': 133.24, 'end': 141.58},
+                  {'id': 'b', 'text': ' 캐러멜칩이', 'start': 141.58, 'end': 143.46},
+                  {'id': 'c', 'text': ' 들어갔다는데.', 'start': 143.46, 'end': 144.78}],
+        'speech': [[134.84, 135.03], [135.35, 136.63], [138.42, 139.67], [140.31, 141.56], [142.81, 144.31]]}}
+    placed = {w['text'].strip(' .'): (w['start'], w['end']) for w in t.voice_words(asset)}
+    assert 138.42 <= placed['필링까지'][0] < 139.67
+    assert 140.31 <= placed['캐러멜칩이'][0] < 141.56
+    assert 142.81 <= placed['들어갔다는데'][0] < 144.31

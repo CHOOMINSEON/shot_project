@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports
+from . import db, timeline, proofreading, script_edit, scene_index, scene_search, guided, exports, conti
 from .media import Cancelled, compose_layers, probe, render_piece, run_ffmpeg, speed_up
 from .settings import ASR_BEAM, ASR_THREADS, DATA, MODEL_DIR, MODEL_NAME, WINDOW_SECONDS, MAX_OUTPUT_SECONDS
 
@@ -514,6 +514,60 @@ def edit_script(ident, payload):
     return {**result,**exported}
 
 
+def find_restarts(ident, videos, clips):
+    """편집에 남은 말 근처 목소리 구간을 하나씩 따로 받아 적어 '버벅이며 다시 말한 앞 시도'를 찾는다 → 새로 찾은 개수.
+
+    전체 인식은 반복을 한 번으로 줄여 적는다(1122 원본 121~144초: '먼저, 먼저 CU 소금우유는 / 밀크초콜릿에 소금을 …'
+    을 네 번 다시 말했는데 '먼저 수유 소금우유는 밀크초콜릿에 … 필링까지'로 한 번만 적혔다). 구간별 글자는
+    analysis['burst_text']에, 찾은 앞 시도는 analysis['restarts']에 저장해 다음 편집·자막에서 다시 쓴다.
+    """
+    total = 0
+    for asset in videos:
+        analysis = asset['analysis']
+        if not analysis.get('words') or not analysis.get('speech'):
+            continue
+        spans = [(c['start'], c['end']) for c in clips if c['asset_id'] == asset['id']]
+        near = [(a, b) for a, b in analysis['speech'] if b - a >= .2 and any(a < y + 4 and b > x - 1 for x, y in spans)]
+        bursts = guided.split_bursts(asset.get('_envelope'), near)   # VAD 한 구간 안의 짧은 멈춤에서도 나눈다
+        if not bursts:
+            continue
+        texts = dict(analysis.get('burst_text') or {})
+        words = dict(analysis.get('burst_words') or {})
+        todo = [(a, b) for a, b in bursts if f'{a:.2f}' not in texts or f'{a:.2f}' not in words]
+        if todo:
+            model = load_model(analysis.get('model') if analysis.get('model') in MODEL_RANK else None)
+            for n, (a, b) in enumerate(todo):
+                check_cancel(ident)
+                update(ident, .5 + .05 * n / len(todo), f'다시 말한 곳 찾기 {n + 1}/{len(todo)}')
+                raw = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-ss', f'{max(0., a - .1):.3f}', '-i', str(asset_path(asset['id'])),
+                                      '-t', f'{b - a + .2:.3f}', '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', '-'],
+                                     capture_output=True, timeout=120, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+                audio = np.frombuffer(raw[:len(raw) // 2 * 2], '<i2').astype(np.float32) / 32768.
+                if not len(audio):
+                    continue
+                segments, _ = model.transcribe(audio, language='ko', beam_size=ASR_BEAM, vad_filter=False,
+                                               condition_on_previous_text=False, word_timestamps=True)
+                segments = list(segments)
+                texts[f'{a:.2f}'] = ' '.join(seg.text.strip() for seg in segments).strip()
+                base = max(0., a - .1)
+                words[f'{a:.2f}'] = [[round(base + float(x.start), 3), round(base + float(x.end), 3), x.word]
+                                     for seg in segments for x in (seg.words or [])]
+        found = guided.find_restarts([{'start': a, 'end': b, 'text': texts.get(f'{a:.2f}', '')} for a, b in bursts])
+        for a, b in bursts:   # 한 숨에 같은 단어를 두 번('맛은 맛은'): 앞의 것을 뺀다
+            found += guided.word_repeats(words.get(f'{a:.2f}', []))
+        old = [tuple(r) for r in analysis.get('restarts') or []]
+        new = [r for r in found if r not in old]
+        with db.connection() as conn:
+            stored = db.get_asset(asset['id'])['analysis']
+            stored['burst_text'] = texts
+            stored['burst_words'] = words
+            stored['restarts'] = sorted(set(old) | set(found))
+            conn.execute('UPDATE assets SET analysis=? WHERE id=?', (json.dumps(stored, ensure_ascii=False), asset['id']))
+        asset['analysis'] = {**analysis, 'burst_text': texts, 'burst_words': words, 'restarts': sorted(set(old) | set(found))}
+        total += len(new)
+    return total
+
+
 def audio_envelope(asset):
     """10ms 단위 음량(dB). 말끝 여유(guided.speech_tail)에 쓴다. 원본별로 한 번만 계산해 저장한다."""
     path = asset_path(asset['id'])
@@ -621,6 +675,21 @@ def guided_edit(ident, payload):
                 detected['guideline'] = True
         # 영상 콘티의 '목표 N초'는 해석할 때만 앞에 붙인다(저장하는 지침 원문은 그대로).
         rules = guided.parse_guideline(guided.storyboard_guideline(payload['guideline'], payload.get('storyboard', '')), style)
+        story_text = payload.get('storyboard', '') or ''
+        if story_text.strip():
+            # 영상 콘티 대사: 편의점·제품 이름으로 인식 오류를 고친 단어로 편집한다(저장된 인식 결과는 그대로).
+            for asset in videos:
+                if asset['analysis'].get('words'):
+                    asset['analysis'] = {**asset['analysis'], 'words': conti.correct_words(asset['analysis']['words'], story_text)}
+            said, seconds = conti.narration_lines(story_text, [w for a in videos for w in a['analysis'].get('words', [])])
+            if said:
+                # 콘티 앞 줄이 원본 어디에도 없으면 캡컷에서 따로 녹음하는 나레이션이다: 그 길이만큼 첫 부분을 베스트 컷으로 채운다.
+                rules['post_narration'] = True
+                rules['narration_seconds'] = seconds
+                rules['applied'].append(f'영상 콘티 첫 {len(said)}줄은 원본에 없는 나레이션 → 첫 약 {seconds:.0f}초 나레이션 자리')
+            rules['conti_hints'] = conti.hints(story_text)
+            if rules['conti_hints']:
+                rules['applied'].append('영상 콘티 [실제 반응] 단서(' + ' · '.join(w for ws in rules['conti_hints'].values() for w in ws[:2]) + ')가 든 평가 우선')
         if rules.get('scenes') and scenes.records:
             # 지시문의 '남길 장면'마다 화면 검색(CLIP·OCR)으로 후보를 찾아 둔다.
             rules['scene_hits'] = {}
@@ -647,6 +716,17 @@ def guided_edit(ident, payload):
             if asset['analysis'].get('words'):
                 asset['_envelope'] = audio_envelope(asset)   # 말끝이 잘리지 않게 실제 음량으로 끝 여유를 정한다
         planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+        try:
+            found = find_restarts(ident, videos, planned['clips'])
+        except Cancelled:
+            raise
+        except Exception as exc:   # 다시 말한 곳 찾기가 실패해도 편집은 만든다
+            stage_log(ident, f'다시 말한 곳 찾기 실패: {exc}')
+            found = 0
+        if found:
+            update(ident, .55, f'버벅이며 다시 말한 앞 시도 {found}곳을 빼고 다시 구성')
+            planned = guided.plan(videos, rules, frames_by_asset, scenes.evidence, before.get('fps', 30), lambda: check_cancel(ident))
+            planned['warnings'].append(f'버벅이며 다시 말한 앞 시도 {found}곳은 빼고 마지막(끝까지 말한) 시도만 남겼어요.')
         for asset in videos:
             asset.pop('_envelope', None)   # 저장되는 데이터에 섞이지 않게
         lines = []

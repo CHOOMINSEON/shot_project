@@ -404,6 +404,13 @@ def parse_guideline(text, style='oneshot'):
     rules['hook_montage'] = (food or style == 'recipe') and not re.search(r'몽타주\s*(빼|없이|쓰지)', text)
     # 첫 후킹 나레이션을 캡컷에서 따로 녹음하는 영상(사용자 편집본 1123: 첫 10초 = 후녹음 나레이션 + 제품 모아 보여 주기 컷).
     # 영상마다 다르므로 프로젝트 이름이나 지침에 '후 나레이션'이 적혀 있을 때만 그 자리를 비워 둔다.
+    # 사용자 규칙(2026-11-23): 말할 때는 무조건 얼굴(화면을 바라보는 모습). 다른 화면 위 나레이션은 먹을 때만.
+    rules['face_talk'] = not re.search(r'(설명|말|발화).{0,12}(디테일|제품\s*컷|B\s*롤).{0,8}(얹|깔|넣)', text)
+    if rules['face_talk']:
+        rules['applied'].append('말할 때는 얼굴 화면 그대로 · 먹는 화면 위에만 소감 나레이션')
+    rules['no_silence'] = not re.search(r'(무음|쉼)\s*(은|을|는)?\s*(유지|남겨|살려)', text)
+    if rules['no_silence']:
+        rules['applied'].append('첫 나레이션 자리 말고는 무음 삭제(말끝은 소리가 잦아드는 곳까지)')
     rules['post_narration'] = bool(POST_NARRATION.search(text)) and not re.search(r'후\s*나레이션\s*(없|안|빼|제외)', text)
     if rules['post_narration']:
         rules['applied'].append('첫 부분에 후 나레이션(캡컷 녹음) 자리: 제품 모아 보여 주기·상자·단면 컷 약 10초')
@@ -678,7 +685,7 @@ def _overlap(a0, a1, b0, b1):
 TAIL_MIN, TAIL_DEFAULT, TAIL_MAX = .2, .25, .35
 
 
-def speech_tail(envelope, end):
+def speech_tail(envelope, end, lo=None):
     """문장 끝 뒤로 얼마나 더 둘지(초). 말끝이 흐려지며 잦아드는 소리까지 살린다.
 
     envelope: {'rate': 초당 값 수, 'db': 10ms 음량(dB) 목록, 'floor': 바닥 소음, 'voice': 말소리 기준}.
@@ -694,8 +701,204 @@ def speech_tail(envelope, end):
     for i in range(start, min(len(db), start + int(TAIL_MAX * rate) + 1)):
         quiet = quiet + 1 if db[i] < threshold else 0
         if quiet >= 6:
-            return min(TAIL_MAX, max(TAIL_MIN, (i - 5) / rate - end + .06))
+            return min(TAIL_MAX, max(TAIL_MIN if lo is None else lo, (i - 5) / rate - end + .06))
     return TAIL_MAX if start < len(db) else TAIL_DEFAULT
+
+
+RESTART_HEAD = 8
+
+
+def find_restarts(bursts, gap=3.):
+    """버벅이며 다시 말한 앞 시도(목소리 구간) 목록 [(시작, 끝)].
+
+    bursts: 목소리(VAD) 구간마다 따로 받아 적은 글자 [{'start', 'end', 'text'}](시간 순).
+    전체를 한 번에 받아 적으면 인식기가 반복을 한 번으로 줄여 적어서('먼저, 먼저 CU 소금우유는' → '먼저 CU 소금우유는')
+    편집이 두 번 말한 소리를 그대로 남겼다(사용자: '이건 8점, 이건 8점 드릴게요 2번 반복한다니까?').
+    바로 뒤 구간(3초 안)이 이 구간의 말로 다시 시작하면 이 구간은 앞 시도다. 마지막(끝까지 말한) 시도만 남긴다.
+    1122 원본: '먼저' → '먼저 씨유 소금우유는', '밀크초콜릿에 소금을' → '밀크초콜릿에 소금우유 필링까지'.
+    """
+    from .conti import similar
+    norm = lambda t: re.sub(r'[^가-힣A-Za-z0-9]', '', t or '')
+    out = []
+    for i, a in enumerate(bursts):
+        x = norm(a.get('text'))
+        if len(x) < 2:
+            continue
+        # 뒤 구간들을 이어 붙여 비교한다: 다시 말할 때 쉼에서 나뉘기도 한다('밀크초콜릿에서 소금을' →
+        # '밀크초콜릿에' / '소금우유 필링이랑'). '네'·'음' 같은 한 글자 구간은 건너뛴다.
+        y, end = '', a['end']
+        b0 = bursts[i + 1]['start'] if i + 1 < len(bursts) else float('inf')
+        for b in bursts[i + 1:]:
+            if b['start'] - end > gap or len(y) >= min(len(x), RESTART_HEAD):
+                break
+            end = b['end']
+            t = norm(b.get('text'))
+            if len(t) >= 2:
+                y += t
+        k = min(len(x), RESTART_HEAD)
+        if len(y) < k:
+            continue
+        # 앞 시도의 첫머리(최대 8글자)로 다시 시작하면 다시 말한 것('밀크초콜릿에 소금우유 필링까지' → '밀크초콜릿에서 소금을')
+        # 세 글자 이하로 끊긴 시도는 첫 두 글자만 비슷해도(인식기가 '겉이'를 소리 나는 대로 '거치'로 적음) 바로 다시 말한 것
+        short = len(x) <= 3 and b0 - a['end'] <= 1. and similar(x[:2], y[:2]) >= .6
+        if short or similar(x[:k], y[:k]) >= .75:
+            out.append((float(a['start']), float(a['end'])))
+            continue
+        # 끝에서 더듬은 시도: 앞 구간 끝 2~3글자가 뒤 구간 첫머리('저는 크런.. / 크런키한 식감이')
+        if b0 - a['end'] > 1.:
+            continue
+        for t in (3, 2):
+            if len(x) > t and x[-1] not in ENDINGS and x[-t] == y[0] and similar(x[-t:], y[:t]) >= .4:
+                keep = len(x) - t
+                if keep < 3:      # 앞에 남는 말이 짧으면('저는') 구간째 뺀다: 정상으로 다시 말한 뒤만 남긴다
+                    out.append((float(a['start']), float(a['end'])))
+                else:             # 글자 수 비율로 더듬은 끝부분만 뺀다
+                    cut = a['start'] + (a['end'] - a['start']) * keep / len(x)
+                    out.append((round(float(cut), 2), float(a['end'])))
+                break
+    return out
+
+
+def word_repeats(words, gap=.6):
+    """한 숨에 같은 말을 두 번 한 곳의 앞쪽 [(시작, 끝)]. words: 목소리 구간을 따로 받아 적은 단어 [(시작, 끝, 글자)].
+
+    사용자: '단어가 중복되면 안돼'(1122 '아니 맛은 맛은 있거든요?' 1145.6~1147.2초, 쉼 없이 이어 말함).
+    같은 단어(또는 두 단어 묶음)가 바로 이어 나오면 앞의 것을 뺀다(뒤 단어 시작 직전까지).
+    """
+    norm = lambda t: re.sub(r'[^가-힣A-Za-z0-9]', '', t or '')
+    out, i = [], 0
+    while i < len(words):
+        for n in (2, 1):
+            a, b = words[i:i + n], words[i + n:i + 2 * n]
+            if len(b) == n and all(norm(x[2]) for x in a) and [norm(x[2]) for x in a] == [norm(x[2]) for x in b] \
+                    and b[0][0] - a[-1][1] < gap:
+                out.append((float(a[0][0]), float(b[0][0])))
+                i += n
+                break
+        else:
+            i += 1
+    return out
+
+
+ENDINGS = set('요다데고서죠까네지게')   # 말이 끝난 글자: 다음 말이 우연히 같은 소리로 시작해도 더듬은 게 아니다
+
+
+def split_bursts(envelope, speech, dip=.08, shortest=.3):
+    """목소리(VAD) 구간을 그 안의 짧은 멈춤(0.08초 이상 조용)에서 더 나눈다.
+
+    1122 원본 348.9~350.9초는 VAD 한 구간이지만 '이건 8점 드(0.15초 멈춤) 이건 8점 드릴게요'였다. 따로 받아 적어야
+    앞 시도를 찾을 수 있다. 음량 정보가 없으면 그대로.
+    """
+    out = []
+    for a, b in speech:
+        a, b = float(a), float(b)
+        if not envelope or b - a < 2 * shortest:
+            out.append((a, b))
+            continue
+        rate, db = envelope['rate'], envelope['db']
+        threshold = envelope['floor'] + .35 * (envelope['voice'] - envelope['floor'])
+        cuts, run = [], 0
+        for i in range(int(a * rate), min(len(db), int(b * rate))):
+            run = run + 1 if db[i] < threshold else 0
+            if run == int(dip * rate):
+                cuts.append((i - run + 1) / rate)
+            if run >= int(dip * rate):
+                cuts[-1] = (cuts[-1], (i + 1) / rate) if not isinstance(cuts[-1], tuple) else (cuts[-1][0], (i + 1) / rate)
+        t = a
+        for c in cuts:
+            x, y = c if isinstance(c, tuple) else (c, c)
+            if x - t >= shortest and b - y >= shortest:
+                out.append((t, x))
+                t = y
+        out.append((t, b))
+    return out
+
+
+def retold(start, end, voice, restarts, taken=(), reach=3.):
+    """목소리가 모두 '다시 말한 앞 시도'인 문장 → 뒤에 다시 말한 목소리 구간 (시작, 끝), 없으면 None.
+
+    1122 원본 349~351초 '이건 8점 드(멈춤) 이건 8점 드릴게요'만 받아 적혔고, 끝까지 다시 말한 351.7~352.9초
+    '이거는 8점 드릴게요'에는 단어가 없었다. 앞 시도 바로 뒤(3초 안) 단어 없는 목소리를 그 문장으로 쓴다.
+    taken: 다른 문장 단어가 있는 시간 [(시작, 끝)].
+    """
+    mine = [(a, b) for a, b in restarts if a < end + .5 and b > start - .5]
+    if not mine or any(a < end and b > start for a, b in voice):
+        return None
+    t = max(b for _, b in mine)
+    out = []
+    for a, b in voice:
+        if a < t or a - (out[-1][1] if out else t) > (reach if not out else .7):
+            if out:
+                break
+            continue
+        if any(x < b and y > a for x, y in taken):
+            break
+        out.append((a, b))
+    if not out:
+        # 인식기 단어 시간이 늦게 찍혀(최대 1.5초) 실제 목소리가 앞 시도보다 앞에 있는 경우
+        # (1122 395.1초 'GS 호지차부터는' → 단어는 397.1초, 397.8초는 '겉이 닼' 끊긴 시도)
+        first = min(a for a, _ in mine)
+        before = [(a, b) for a, b in voice if first - 1.5 <= b <= first and not any(x < b and y > a for x, y in taken)]
+        if before:
+            return before[-1]
+    return (out[0][0], out[-1][1]) if out else None
+
+
+def lead_before_restart(start, s0, gaps, voice, restarts, lo):
+    """문장 첫머리가 끊긴 시도(뺀 구간)였으면, 인식기 시간이 늦어 그보다 앞에 있는 실제 첫마디를 붙인다 → (s0, gaps).
+
+    1122 원본: 395.1초 'GS 호지차부터는' / 397.8초 '겉이 닼'(뺌) / 398.7초 '겉이 다크 초콜릿인데'. 단어는 397.1초부터
+    찍혀서 첫마디 'GS 호지차부터는'이 빠졌다.
+    """
+    cut = [a for a, b in restarts if b <= s0 + .05 and b > start - VOICE_REACH]
+    if not cut:
+        return s0, gaps
+    lead = [(a, b) for a, b in voice if min(cut) - 1.5 <= b <= min(cut) and a >= lo]
+    if not lead:
+        return s0, gaps
+    return lead[-1][0], [(lead[-1][1], s0)] + list(gaps)
+
+
+def voiced(analysis):
+    """목소리(VAD) 구간에서 버벅이며 다시 말한 앞 시도(analysis['restarts'])를 잘라 낸 것."""
+    restarts = sorted((float(x), float(y)) for x, y in analysis.get('restarts') or [])
+    out = []
+    for a, b in analysis.get('speech') or []:
+        pieces = [(float(a), float(b))] if b > a else []
+        for x, y in restarts:
+            if any(q0 < y and q1 > x for q0, q1 in pieces):
+                pieces = [p for q0, q1 in pieces for p in ((q0, min(q1, x)), (max(q0, y), q1)) if p[1] - p[0] >= .05]
+        edges = [t for x, y in restarts for t in (x, y)]
+        touch = lambda t: any(abs(t - e) < .02 for e in edges)
+        # 앞 시도 두 개 사이에 낀 짧은 멈춤 조각(0.25초 미만)은 남기지 않는다('이건 8점 드 | 이건 8점 드릴게요' 사이)
+        out += [(a0, b0) for a0, b0 in pieces if b0 - a0 >= .25 or not (touch(a0) and touch(b0))]
+    return out
+
+
+HEAD_MAX = .6   # 목소리(VAD) 시작보다 앞으로 당길 수 있는 최대 거리
+
+
+def speech_head(envelope, start, lo=0.):
+    """목소리(VAD) 시작이 실제 말 시작보다 늦을 때 실제 시작(초).
+
+    1122 원본: '단짠단짠한데'(VAD 324.66초)와 '호지차 맛이 난다'(VAD 461.59초)는 실제 말소리가 0.35~0.4초 먼저
+    시작했다. VAD 시작부터 잘라 '짠한데', 'ㅈ차맛'처럼 첫 글자가 잘렸다(사용자 피드백 '중간중간 끊겨'). 음량이 말소리 크기
+    (바닥과 말소리 기준의 가운데)로 이어지는 곳까지 최대 0.6초 앞으로 당긴다. 정보가 없으면 그대로.
+    """
+    if not envelope:
+        return start
+    rate, db = envelope['rate'], envelope['db']
+    threshold = envelope['floor'] + .5 * (envelope['voice'] - envelope['floor'])
+    i = min(len(db), int(start * rate))
+    first, quiet = i, 0
+    for j in range(i - 1, max(-1, int(max(lo, start - HEAD_MAX) * rate) - 1), -1):
+        if db[j] >= threshold:
+            first, quiet = j, 0
+        else:
+            quiet += 1
+            if quiet > 6:
+                break
+    return max(lo, min(start, first / rate - .05)) if first < i else start
 
 
 VOICE_LEAD = .15        # 실제 목소리(VAD) 시작 앞 여유: 첫 자음이 잘리지 않게
@@ -704,7 +907,7 @@ PAUSE_KEEP = (.18, .12)  # 문장 안 긴 쉼을 줄일 때 남기는 앞·뒤 �
 PAUSE_LONG = .5          # 이보다 긴 문장 안 쉼만 줄인다
 
 
-def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
+def snap_to_voice(start, end, voice, lo=0., hi=float('inf'), swallow=False):
     """인식기(Whisper) 문장 시간 → 실제 목소리(VAD) 기준 시간.
 
     실제 원테이크 먹방 원본(1122 가나 프리미엄)에서 Whisper 단어 시간이 실제 목소리보다 0.4~1초 늦거나
@@ -723,7 +926,7 @@ def snap_to_voice(start, end, voice, lo=0., hi=float('inf')):
     s = max(inside[0][0], start - VOICE_REACH, lo)
     e = min(inside[-1][1], hi, end + .6)
     covered = sum(max(0., min(b, end) - max(a, start)) for a, b in inside)
-    if covered < .4 * (end - start):
+    if covered < .4 * (end - start) and not swallow:   # 반복을 삼킨 긴 단어가 있으면 덮인 비율이 원래 낮다
         # 배경 소음이 커서 VAD가 목소리를 일부만 잡은 경우: 인식기 시간에서 0.25초까지만 줄인다(말 잘림 방지).
         s, e = min(s, start + .25), max(e, min(end - .25, hi))
     if e - s < .15:
@@ -771,13 +974,30 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
     fast = rules['fast']
     pre = .08 if fast else .12
     envelope = asset.get('_envelope')
-    voice = [(float(a), float(b)) for a, b in (asset['analysis'].get('speech') or []) if b > a]
+    voice = voiced(asset['analysis'])
+    restarts = [(float(x), float(y)) for x, y in asset['analysis'].get('restarts') or []]
     prev_end = 0.
     for i, s in enumerate(sentences):
         nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
-        s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt)
+        if restarts and not any(a < s['end'] and b > s['start'] for a, b in voice) \
+                and any(a < s['end'] and b > s['start'] for a, b in restarts):
+            # 같은 말을 반복했다고 이미 뺀 문장(mark_redundant)의 목소리는 이 문장이 다시 쓸 수 있다('이마트24도 허니페어인데' 세 번)
+            again = retold(s['start'], s['end'], voice, restarts, [(x['start'], x['end']) for x in sentences if x is not s and not x['drop']])
+            if again:   # 끝까지 다시 말한 목소리(단어 없음)를 이 문장으로 쓴다('이건 8점 드…' → '이거는 8점 드릴게요')
+                s.update(start=again[0], end=again[1], word_times=[])
+                nxt = sentences[i + 1]['start'] if i + 1 < len(sentences) else duration
+            else:       # 1122 '밀크초콜릿에 소금을': 뒤 문장에서 다시 말했다
+                s['drop'] = s.get('drop') or ('retake', '버벅이며 다시 말한 앞 시도(뒤에 다시 말함)')
+        swallow = any(w1 - w0 > SWALLOW for w0, w1 in s.get('word_times', []))
+        s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt, swallow)
         if gaps:
             s0, gaps = skip_swallowed(s0, s1, gaps, s.get('word_times', []))
+        s0, gaps = lead_before_restart(s['start'], s0, gaps, voice, restarts, prev_end)
+        if envelope:
+            # VAD가 늦게 잡은 말 시작(문장 첫머리, 문장 안 쉼 뒤)을 실제 음량으로 당긴다
+            s0 = speech_head(envelope, s0, prev_end)
+            gaps = [(a, max(a, speech_head(envelope, b, a))) for a, b in gaps]
+            gaps = [(a, b) for a, b in gaps if b - a > .05]
         s['voice'] = (s0, s1, gaps) if (s0, s1) != (s['start'], s['end']) or gaps else None
         prev_end = s1 if s['voice'] else s['end']
     units = []
@@ -791,17 +1011,22 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
         rows = [r for r in frames if r['start'] < s['end'] and r['end'] > s['start']]
         labels = [l for l in s['labels'] if l in LABEL_KO] or ['chat']
         lead = s.get('voice_pre', pre)
+        # 무음 삭제(사용자 2026-11-23 '초반 후킹 10초 빼곤 무음 삭제해줘'): 문장 앞뒤 여유를 말소리가 끝나는 곳까지만
+        quiet = rules.get('no_silence') and envelope
+        if quiet:
+            lead = min(lead, .08)
+        tail = speech_tail(envelope, s['end'], .06) if quiet else speech_tail(envelope, s['end'])
         unit = {'kind': 'speech', 'asset_id': asset['id'], 'filename': asset['name'],
-                'start': max(0., s['start'] - lead), 'end': min(duration, s['end'] + speech_tail(envelope, s['end'])), 'speech_start': s['start'],
+                'start': max(0., s['start'] - lead), 'end': min(duration, s['end'] + tail), 'speech_start': s['start'],
                 'speech_end': s['end'], 'text': s['text'], 'labels': labels, 'role': labels[0],
                 'visual_roles': roles[:2], 'confidence': s['confidence'], 'drop': s['drop'],
                 'review': list(s['review']), 'negated': s['negated'], 'numbers': s['numbers'],
                 'texture': s['texture'], 'mistake': s['mistake'], 'complete': s['complete']}
-        if rules.get('tight'):
+        if rules.get('tight') or quiet:
             # 문장 안의 쉼도 뺀다. 쉼 앞 단어의 말끝은 살린다(말끝 흐림 방지).
             cuts = []
             for a, b in s.get('pauses', []):
-                c0, c1 = a + speech_tail(envelope, a), b - pre
+                c0, c1 = (a + speech_tail(envelope, a, .06), b - .08) if quiet else (a + speech_tail(envelope, a), b - pre)
                 if c1 - c0 >= .12:
                     cuts.append((c0, c1))
             unit['pauses'] = cuts
@@ -809,6 +1034,17 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
             # 먹방 등: 문장 안에서 0.5초 넘게 멈춘 곳(씹는 중·생각 중)은 0.3초 숨만 남기고 줄인다.
             unit['pauses'] = [(a + PAUSE_KEEP[0], b - PAUSE_KEEP[1]) for a, b in s['pauses']
                               if b - a > PAUSE_LONG and b - PAUSE_KEEP[1] - (a + PAUSE_KEEP[0]) >= .15]
+        inside = [(max(x, unit['start']), min(y, unit['end'])) for x, y in restarts if x < unit['end'] - .05 and y > unit['start'] + .05]
+        if inside:
+            # 다시 말한 앞 시도·두 번 말한 단어는 말끝 여유 없이 정확히 잘라 낸다(쉼 자르기와 합친다)
+            cuts = sorted(list(unit.get('pauses', [])) + inside)
+            merged = []
+            for a, b in cuts:
+                if merged and a <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+                else:
+                    merged.append((a, b))
+            unit['pauses'] = merged
         if s['confidence'] < .5:
             unit['review'].append('인식 신뢰도 낮음 · 원음 확인 필요')
         prod = product_for(rows, evidence, asset['id'])
@@ -1065,6 +1301,9 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
                 s -= .5
             # 완성본 1123에서 사용자가 남긴 평가 = 자기 취향·이유가 담긴 문장("저는 크런키한 식감이 좋더라고요",
             # "진짜 꿀이랑 배맛이 너무 잘 나는데요?", "묶어서 판매해주세요"). 뺀 문장 = "맛있다." 같은 두세 단어 감탄.
+            # 영상 콘티 [실제 반응] 단서(커스터드·짠맛·호지차 향·꿀맛 …)가 든 평가는 남긴다.
+            if set(u['labels']) & {'taste', 'pro', 'con'} and any(w in u['text'] for ws in (rules.get('conti_hints') or {}).values() for w in ws):
+                s += 1.5
             if set(u['labels']) & {'taste', 'pro', 'con'}:
                 if OPINION.search(u['text']):
                     s += 1.5
@@ -1088,7 +1327,7 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             warnings += scene_warn
     if rules.get('overlay_eating', True) and not scene_mode:
         moments = [m for a in assets if a['analysis'].get('words') for m in _eating_moments(a, frames_by_asset.get(a['id'], []))]
-        kept, overlaid, laid_units = overlay_eating(kept, extra=moments)
+        kept, overlaid, laid_units = overlay_eating(kept, extra=moments, eating_only=rules.get('face_talk', False))
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
     if total(kept) > target_max and not rules.get('no_trim') and not scene_mode:
@@ -1097,13 +1336,31 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         _anchor_product_intros(kept)
         order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP) and not u.get('bite') and not u.get('after_bite')
                         and not u.get('intro_anchor')), key=lambda u: (score(u), -length(u)))
+        # 말이 이어지는 문장 묶음(끝나지 않은 문장 + 바로 뒤 이어지는 문장)은 같이 빼거나 같이 남긴다.
+        # 1122 예시: '먹으면 순식간에 사라지고 / 편의점 네 군데가'까지만 남고 '돌아서 구매해야 된다는 게 별로였던 것 같고'가
+        # 빠져 말이 중간에 끊겼다(사용자: '중간중간 끊겨있다니깐').
+        speech = sorted((x for x in kept if x['kind'] == 'speech'), key=lambda x: (x['asset_id'], x['start']))
+        thought = {id(x): [x] for x in speech}
+        for x, y in zip(speech, speech[1:]):
+            if x['asset_id'] == y['asset_id'] and not x.get('complete', True) and y['start'] - x['end'] < 4:
+                group = thought[id(x)] + [z for z in thought[id(y)] if z not in thought[id(x)]]
+                for z in group:
+                    thought[id(z)] = group
         for u in order:
             if total(kept) <= target_max:
                 break
-            kept.remove(u)
-            removed.append({'asset_id': u['asset_id'], 'filename': u['filename'], 'start': u['start'], 'end': u['end'],
-                            'reason_code': 'length', 'reason': f'목표 길이 {target_max}초 초과 · 우선순위 낮은 {LABEL_KO.get(u["role"], ROLE_LABEL.get(u["role"], u["role"]))}',
-                            'text': u['text']})
+            if u not in kept:
+                continue
+            group = thought.get(id(u), [u])
+            if any(set(z['labels']) & MUST_KEEP or z.get('bite') or z.get('after_bite') or z.get('intro_anchor') for z in group):
+                continue
+            for z in group:
+                if z not in kept:
+                    continue
+                kept.remove(z)
+                removed.append({'asset_id': z['asset_id'], 'filename': z['filename'], 'start': z['start'], 'end': z['end'],
+                                'reason_code': 'length', 'reason': f'목표 길이 {target_max}초 초과 · 우선순위 낮은 {LABEL_KO.get(z["role"], ROLE_LABEL.get(z["role"], z["role"]))}',
+                                'text': z['text']})
         if total(kept) > target_max:
             warnings.append(f'보존해야 할 결론·문장을 자르지 않아 목표 {target_max}초를 {total(kept) - target_max:.1f}초 넘겼어요.')
     if scene_mode and total(kept) > target_max:
@@ -1147,18 +1404,21 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
     broll = _detail_shots(assets, frames_by_asset, evidence, names) if rules.get('bites') and not scene_mode else []
     order = [names[k][0] for k in sorted(names)]
     # 후 나레이션 자리가 있으면 제품별 첫 컷(상자)을 그 자리에 쓰고, 나머지를 설명 발화에 쓴다(한 컷은 한 번만).
-    story = _storyboard(broll, order, _detail_wants(kept), 1) if broll and rules.get('post_narration') else None
+    allow = DESCRIBE_LABELS if rules.get('face_talk') else DETAIL_LABELS
+    story = _storyboard(broll, order, _detail_wants(kept, allow), 1) if broll and rules.get('post_narration') else None
     # 첫 장면을 먼저 정한다(사용자 편집본 1123: 첫 장면은 제품 여러 개를 함께 들어 보이는 컷). 그다음 제품별 디테일 컷.
-    slot = _opening_slot(broll, order, fps, story=story) if rules.get('post_narration') and broll and not scene_mode else []
+    # 영상 콘티 첫 줄들이 원본에 없는 나레이션이면 그 읽는 길이(배속 전 원본 기준)만큼 채운다.
+    slot_len = min(20., max(6., rules['narration_seconds'] * rules.get('playback', 1))) if rules.get('narration_seconds') else 11.
+    slot = _opening_slot(broll, order, fps, length=slot_len, story=story) if rules.get('post_narration') and broll and not scene_mode else []
     if slot:
         notes.append(f'첫 {sum(u["end"] - u["start"] for u in slot):.0f}초(원본 기준)는 후 나레이션 자리예요: 제품 모아 보여 주기·상자·단면 컷 {len(slot)}개(원본 소리). 캡컷에서 나레이션을 녹음해 얹으세요.')
-    if not slot and rules.get('hook_montage', True) and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
+    if not slot and rules.get('hook_montage', True) and not rules.get('face_talk') and not scene_mode and kept and kept[0]['kind'] == 'speech' and not kept[0].get('overlay'):
         pieces = _opening_lineup(kept[0], broll, fps) if broll else []
         if pieces:
             kept[0]['montage'] = pieces
             notes.append(f'첫 멘트 아래에 제품 여러 개를 들어 보이는 컷 {len(pieces)}개를 이어 붙였어요(직접 편집본 1123 방식).')
-    if broll:
-        laid = _overlay_details([u for u in kept if not u.get('montage')], broll, story)
+    if broll:   # face_talk면 제품 설명 발화에만 끼운다(맛·점수·총평은 얼굴)
+        laid = _overlay_details([u for u in kept if not u.get('montage')], broll, story, allow)
         if laid:
             notes.append(f'제품 설명 발화 위에 따로 찍은 같은 제품 디테일 컷 {laid}개를 얹었어요(소리는 발화 그대로). 제품마다 촬영 구간 처음·가운데·끝에서 서로 다른 장면으로 골랐어요.')
     kept = slot + kept
@@ -1335,6 +1595,10 @@ def hook_montage(hook, shots, fps=30, fast_piece=.28, max_fast=5):
 DETAIL_TAKE = (8, .03)   # 단어 8개 미만·말소리 3% 미만인 영상 = 따로 찍은 디테일 컷(제품·포장·단면)
 DETAIL_SHOW = (.8, 1.4)  # 디테일 컷 하나를 보여 주는 길이(완성본 1123 실측 0.75~1.5초)
 DETAIL_LABELS = {'describe', 'intro', 'compare', 'taste', 'pro', 'con', 'price'}
+# 말할 때는 얼굴 규칙(face_talk)에서도 따로 찍어 둔 제품·단면 컷은 '제품 설명'(포장·재료·필링 설명) 위에는 끼운다.
+# 사용자(2026-11-23 '내가 중간중간 끼워둔 영상이 아예 없어'): 직접 편집본 1123도 필링·캐러멜칩·배시럽 설명 위에 같은 제품 컷을 넣었다.
+# 맛 평가·장점·점수·총평은 얼굴(맛 평가는 먹는 화면 나레이션)로 둔다.
+DESCRIBE_LABELS = {'describe', 'intro'}
 FACE_LABELS = {'score', 'conclusion', 'repurchase', 'question', 'wrapup'}
 
 
@@ -1355,7 +1619,8 @@ JOSA = ('부터는', '부터', '인데', '에는', '이라', '이에요', '예�
 
 def _name_tokens(text):
     out = []
-    for raw in re.findall(r'[가-힣A-Za-z0-9]+', text):
+    # '허니&페어', '허니-페어'처럼 기호로 이은 이름은 한 단어로 본다(1122: '허니'·'페어인데'로 갈라져 '필링이랑'이 이름이 됐다).
+    for raw in re.findall(r'[가-힣A-Za-z0-9]+(?:[&+·\-][가-힣A-Za-z0-9]+)*', text):
         word = re.sub(r'[^가-힣]', '', raw)
         for j in JOSA:
             if word.endswith(j) and len(word) - len(j) >= 2:
@@ -1540,13 +1805,32 @@ def _spread(pool, k, gap):
     return sorted(picked, key=lambda s: (s['asset_id'], s['start']))
 
 
-def _detail_wants(kept):
+def _spoken(u, after=None):
+    """쉼을 뺀 실제 말 길이(after가 있으면 그 시각 뒤만)."""
+    a = u['start'] if after is None else after
+    return u['end'] - a - sum(c1 - c0 for c0, c1 in u.get('pauses', []) if a < c0 < c1 < u['end'])
+
+
+def _detail_wants(kept, allow=DETAIL_LABELS):
     """디테일 컷을 얹을 발화를 제품별로 모은다(소개·설명·맛 평가 앞부분). 점수·결론·시식 직후 반응은 얼굴."""
-    wants = {}
+    wants, seen = {}, set()
     for u, k in _product_blocks(kept):
         name = (u.get('product') or {}).get('name') or u.get('auto_product')
         labels = set(u['labels'])
-        if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & DETAIL_LABELS:
+        if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & allow:
+            continue
+        if allow is DESCRIBE_LABELS:
+            # 직접 편집본 1123: 제품 이름을 말하는 첫 설명('먼저 CU 소금우유는')은 상자를 든 얼굴 그대로,
+            # 그다음 설명('밀크초콜릿에 … 필링이랑 캐러멜칩이 들어갔다는데')은 문장 전체를 같은 제품 컷으로 이어 덮는다.
+            if name not in seen:
+                seen.add(name)
+                inner = [c for c in u.get('pauses', []) if u['start'] < c[0] < c[1] < u['end']]
+                if not inner or _spoken(u, after=inner[0][1]) < DETAIL_SHOW[0]:
+                    continue
+                u['intro_face'] = inner[0][0]   # 'GS호지차부터는'(얼굴) / '겉이 다크 초콜릿인데'(상자 컷)
+            if _spoken(u) < DETAIL_SHOW[0]:
+                continue
+            wants.setdefault(name, []).append(u)
             continue
         if u['end'] - u['start'] - .8 < DETAIL_SHOW[0]:
             continue
@@ -1558,7 +1842,8 @@ def _storyboard(shots, names, wants, reserve=0):
     """제품마다 쓸 디테일 컷을 미리 정한다: 필요한 수(+첫 장면 자리)만큼 그 제품 촬영 구간 전체에 고르게."""
     story = {}
     for n in names:
-        k = min(MAX_LOOKS, len(wants.get(n, [])) + reserve)
+        # 쉼으로 나뉜 긴 설명은 컷 두 개를 이어 쓴다(_overlay_details).
+        k = min(MAX_LOOKS, sum(2 if _spoken(u) > 2.4 and u.get('pauses') else 1 for u in wants.get(n, [])) + reserve)
         by = {}
         for s in shots:
             if not s['lineup'] and s['product'] == n:
@@ -1571,9 +1856,9 @@ def _storyboard(shots, names, wants, reserve=0):
     return story
 
 
-def _overlay_details(kept, shots, story=None):
+def _overlay_details(kept, shots, story=None, allow=DETAIL_LABELS):
     """제품 소개·설명·맛 평가 발화 앞부분에 같은 제품 디테일 컷 하나(0.8~1.4초)를 얹는다. 한 컷은 한 번만 쓴다."""
-    wants = _detail_wants(kept)
+    wants = _detail_wants(kept, allow)
     story = story if story is not None else _storyboard(shots, list(wants), wants)
     count = 0
     for name, units in wants.items():
@@ -1582,14 +1867,52 @@ def _overlay_details(kept, shots, story=None):
             if not looks:
                 break
             s = looks[0]
-            take = min(DETAIL_SHOW[1], s['end'] - s['start'], u['end'] - u['start'] - .8)
-            if take < DETAIL_SHOW[0]:
+            if allow is DESCRIBE_LABELS:
+                # 문장 전체를 덮는다(중간에 얼굴로 잠깐 돌아왔다가 다시 컷으로 가는 깜빡임이 없게).
+                # 긴 설명(쉼으로 나뉜 2.4초 이상)은 쉼에서 다음 컷으로 넘긴다(1123: 상자 여는 컷 → 낱개 컷).
+                need = _spoken(u, u.get('intro_face') and next(c1 for c0, c1 in u['pauses'] if c0 == u['intro_face']))
+                second = looks[1] if len(looks) > 1 and need > 2.4 and len(u.get('pauses', [])) > (1 if u.get('intro_face') else 0) else None
+                first = _detail_window(s, shots, need if not second else need / 2)
+                if not first:
+                    continue
+                u['overlay'] = {**first, 'role': s['role'], 'asset_id': s['asset_id']}
+                if u.get('intro_face'):
+                    u['overlay']['skip'] = 1
+                s['used'] = True
+                count += 1
+                if second:
+                    then = _detail_window(second, shots, need)
+                    if then:
+                        u['overlay']['then'] = {**then, 'role': second['role'], 'asset_id': second['asset_id']}
+                        second['used'] = True
+                        count += 1
                 continue
-            mid = (s['start'] + s['end'] - take) / 2
+            else:
+                take = min(DETAIL_SHOW[1], s['end'] - s['start'], u['end'] - u['start'] - .8)
+                if take < DETAIL_SHOW[0]:
+                    continue
+                mid = (s['start'] + s['end'] - take) / 2
             u['overlay'] = {'start': mid, 'end': mid + take, 'role': s['role'], 'asset_id': s['asset_id']}
             s['used'] = True
             count += 1
     return count
+
+
+def _detail_window(s, shots, need):
+    """디테일 컷 s를 need초까지 늘린 화면 구간. 같은 영상에서 같은 제품으로 이어지는 구간 안에서만 늘린다(다른 제품이 섞이지 않게)."""
+    lo, hi = s['start'], s['end']
+    run = sorted((x for x in shots if x['asset_id'] == s['asset_id'] and x['product'] == s['product']), key=lambda x: x['start'])
+    for x in run:
+        if x['start'] <= hi + .6 and x['end'] > hi:
+            hi = x['end']
+    for x in reversed(run):
+        if x['end'] >= lo - .6 and x['start'] < lo:
+            lo = x['start']
+    take = min(need, hi - lo)
+    if take < DETAIL_SHOW[0]:
+        return None
+    a = min(max(lo, (s['start'] + s['end'] - take) / 2), hi - take)
+    return {'start': a, 'end': a + take}
 
 
 def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
@@ -1602,7 +1925,7 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
     """
     step = 1 / fps
     snap = lambda x: round(x / step) * step
-    lineup = _spread([s for s in shots if s['lineup'] and not s['used']], 4, LINEUP_GAP)
+    lineup = _spread([s for s in shots if s['lineup'] and not s['used']], 6 if length > 11 else 4, LINEUP_GAP)
     if story is None:
         story = _storyboard(shots, order, {}, 1)
     boxes = {n: v[0] for n, v in story.items() if v and not v[0]['used']}
@@ -1613,7 +1936,9 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
             mid = len(same) // 2   # 움직임 값이 없으면 단면 영상 가운데(자르는 손이 지나간 뒤 단면이 보이는 쪽)
             cuts.append(min(same, key=lambda c: (c.get('motion') is None, c.get('motion') or 0, abs(same.index(c) - mid))))   # 가장 덜 흔들린 단면 컷
             seen.add(s['asset_id'])
-    picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:4]
+    picked = lineup[:2] + [boxes[n] for n in order if n in boxes] + cuts[:2] + lineup[2:]
+    # 콘티 나레이션이 길면(1122 콘티 첫 세 줄 ≈ 10초) 컷을 늘리고, 그래도 모자라면 한 컷을 1.5초까지 길게 쓴다.
+    piece = min(1.5, max(piece, length / max(1, len(picked))))
     units, total = [], 0.
     for s in picked:
         take = min(piece, s['end'] - s['start'], length - total)
@@ -1627,6 +1952,26 @@ def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
         total += take
         if total >= length - .5:
             break
+    if units and total < length - .5:
+        # 아직 나레이션보다 짧으면 앞에 쓴 컷과 다른 장면(6초 이상·그림 다름)의 단면·제품 모아 보여 주기 컷을 더 잇는다.
+        chosen = [s for s in picked if s['used']]
+        reserved = [v for vs in story.values() for v in vs]
+        pool = [s for s in shots if not s['used'] and (s['lineup'] or s['role'] == 'crosssection')
+                and not any(s is v for v in reserved) and all(_apart(s, c, LOOK_GAP) for c in chosen)]
+        for s in _spread(pool, int((length - total) / piece) + 1, LOOK_GAP):
+            take = min(piece, s['end'] - s['start'], length - total)
+            if take < .5 or not all(_apart(s, c, LOOK_GAP) for c in chosen):
+                continue
+            a = snap((s['start'] + s['end'] - take) / 2)
+            units.insert(len(units) - min(2, len(units) // 3), {   # 마지막 '다시 들고 있는 컷' 앞에 넣는다
+                'kind': 'visual', 'asset_id': s['asset_id'], 'filename': '', 'start': a, 'end': snap(a + take),
+                'role': s['role'], 'labels': [s['role']], 'visual_roles': [s['role']], 'text': '', 'review': ['후 나레이션 자리 · 캡컷에서 녹음'],
+                'drop': None, 'opening_slot': True})
+            s['used'] = True
+            chosen.append(s)
+            total += take
+            if total >= length - .5:
+                break
     return units if len(units) >= 3 else []
 
 
@@ -1689,7 +2034,7 @@ def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):
     return pieces if len(pieces) >= 2 else []
 
 
-def overlay_eating(kept, window=240., extra=()):
+def overlay_eating(kept, window=240., extra=(), eating_only=False):
     """맛 평가 발화 위에 가까운 '말 없는 시식·단면 컷'을 화면으로 얹는다(소리는 발화 그대로).
 
     완성본 1116을 원본과 대조한 결과: 소리 컷 60개 중 28개가 이 방식(먹는 화면 + 나중에 말한 평가 소리)이었고,
@@ -1698,7 +2043,9 @@ def overlay_eating(kept, window=240., extra=()):
     제품을 들어 보이며 소개하는 말, 점수("N점 드릴게요"), 결론은 얼굴이 보이는 원래 화면을 그대로 쓴다.
     얹는 데 쓴 시식 컷은 단독 구간으로는 넣지 않는다(같은 장면이 두 번 나오지 않게).
     """
-    pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES and not u.get('bite')]
+    # eating_only(사용자 규칙 '먹을 때만 나레이션'): 먹는 화면만 얹고, 총평처럼 카메라 보고 하는 말에는 얹지 않는다.
+    roles = ('eating',) if eating_only else OVERLAY_ROLES
+    pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in roles and not u.get('bite')]
     # 말없는 먹는 구간에서 고른 먹방 순간(한입·단면 보여 주기). 시식 나레이션(첫 소감 위 한입 화면)과 겹치거나 이미 있는 화면은 빼고.
     taken = [(u['asset_id'], u['overlay']['start'], u['overlay']['end']) for u in kept if u.get('overlay')] + \
             [(u['asset_id'], u['start'], u['end']) for u in kept if u['kind'] == 'visual']
@@ -1732,6 +2079,8 @@ def overlay_eating(kept, window=240., extra=()):
         # 전체 총평(마지막 점수 뒤)도 한 줄 걸러 먹는 화면을 얹는다(직접 편집본 1123: 총평 1158~1224초 말 위에 1188·1197·1210초 먹는 화면).
         # 총평은 네 제품 전체 이야기라 제품 경계를 따지지 않는다.
         wrap = 'wrapup' in labels and 'score' not in labels and not s.get('after_bite')
+        if wrap and eating_only:
+            continue
         if wrap:
             wraps += 1
             if wraps % 2 == 0:
@@ -1805,6 +2154,12 @@ def _cut_pauses(kept):
         over, used = u.get('overlay'), 0.
         for k, (a, b) in enumerate(pieces):
             piece = {**u, 'start': a, 'end': b, 'pauses': [], 'piece': k}
+            if over and k < over.get('skip', 0):
+                piece['overlay'] = None   # 제품 이름을 말하는 앞부분은 얼굴
+                out.append(piece)
+                continue
+            if over and over.get('then') and used >= 1.:
+                over, used = over['then'], 0.   # 쉼에서 다음 컷으로
             if over:
                 v0 = over['start'] + used
                 piece['overlay'] = {**over, 'start': v0, 'end': min(over['end'], v0 + b - a)} if over['end'] - v0 >= .3 else None
@@ -1846,7 +2201,7 @@ def _merge_clips(kept, assets, rules, fps):
                                       'guided': {'units': [_brief(u)]}}
             continue
         # 문장 사이 0.3초 미만 공백은 이어 붙여 자연스럽게(말 위주 편집·같은 문장의 쉼 조각은 이어 붙이지 않는다).
-        join = .04 if rules.get('tight') or u.get('piece') else .3
+        join = .04 if rules.get('tight') or rules.get('no_silence') or u.get('piece') else .3
         if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < join:
             cur['end'] = max(cur['end'], u['end'])
             cur['guided']['units'].append(_brief(u))
