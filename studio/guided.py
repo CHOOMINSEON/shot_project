@@ -886,6 +886,9 @@ def _add_bites(units, sentences, frames, voice, asset, duration):
         s0 = u['speech_start']
         quiet_from = max([b for a, b in spoken if b <= s0 - .05] + [b for a, b in voice if b <= s0 - .05] + [0.])
         eat = [t for t in eats if quiet_from + .5 <= t <= s0 - .5]
+        if not eat:   # '먹기' 태그가 없어도 그 쉬는 동안 가장 먹는 장면 같은 순간(시각 모델 점수 최대)을 쓴다
+            best = _best_moment(frames, quiet_from + .5, s0 - .5, ('eating',))
+            eat = [best] if best is not None else []
         if s0 - quiet_from < (BITE_GAP if eat else BITE_GAP_BLIND):
             continue
         if eat:
@@ -902,6 +905,47 @@ def _add_bites(units, sentences, frames, voice, asset, duration):
         shown.append((a, a + take))
     # 나레이션 화면으로 쓴 먹는 장면은 따로 넣지 않는다(같은 장면이 두 번 나오지 않게)
     return [u for u in units if u['kind'] != 'visual' or not any(u['start'] < y and u['end'] > x for x, y in shown)]
+
+
+def _best_moment(frames, a, b, keys, avoid=(), near=3.):
+    """a~b초 사이 장면 중 시각 모델 점수(keys 합)가 가장 높은 순간. 점수 기록이 없으면 None.
+
+    말하는 원본의 '먹기' 태그는 드물다(1123 원본 20분 중 17장면). 그래도 말없이 먹는 구간 안에서 점수가 가장 높은 장면은
+    사용자가 직접 고른 먹방 컷과 맞았다(먹기 최대 250·496·1192초 ↔ 직접 편집 246·487·1188초,
+    들고 보여 주기+속 최대 253·491·771초 ↔ 254·493·771초).
+    """
+    rows = [r for r in frames if a <= r['start'] <= b and r.get('similarities')
+            and all(abs(r['start'] - t) > near for t in avoid)]
+    if not rows:
+        return None
+    return max(rows, key=lambda r: sum(r['similarities'].get(k, 0) for k in keys))['start']
+
+
+EAT_SESSION = 8.   # 말없이 이만큼 이어지면 먹는 구간으로 본다
+
+
+def _eating_moments(asset, frames):
+    """말하는 원본의 말없는 먹는 구간마다 '한입 먹는 순간'과 '먹은 단면을 카메라에 보여 주는 순간'을 하나씩 고른다.
+
+    사용자 직접 편집본 1123: 맛 평가와 총평 말 위에 이런 먹방 컷(0.5~1.5초)을 자주 얹었다(62초 중 약 14번).
+    이전 자동 편집은 '먹기' 태그가 붙은 장면만 써서 먹방 모습이 거의 안 나왔다(사용자: '먹방 모습이 사라짐').
+    """
+    spoken = sorted((float(w['start']), float(w['end'])) for w in asset['analysis'].get('words', []))
+    if not spoken or not frames:
+        return []
+    moments = []
+    edges = [(0., spoken[0][0])] + [(spoken[i][1], spoken[i + 1][0]) for i in range(len(spoken) - 1)]
+    for a, b in edges:
+        if b - a < EAT_SESSION:
+            continue
+        show = _best_moment(frames, a + .5, b - .5, ('holding', 'cream', 'crosssection'))
+        bite = _best_moment(frames, a + .5, b - .5, ('eating',), [show] if show is not None else [])
+        for t, role in ((bite, 'eating'), (show, 'crosssection')):
+            if t is not None:
+                moments.append({'kind': 'visual', 'asset_id': asset['id'], 'filename': asset.get('name', ''), 'start': max(a, t - .6),
+                                'end': min(b, t + .8), 'role': role, 'labels': [role], 'visual_roles': [role], 'text': '',
+                                'review': [], 'drop': None, 'eating_moment': True})
+    return sorted(moments, key=lambda m: m['start'])
 
 
 def _mark_wrapup(units):
@@ -1043,7 +1087,8 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
             warnings.append('지시문의 남길 장면을 절반 이상 찾지 못해 일반 자동 편집으로 만들었어요. 장면 묘사를 더 구체적으로 써 주세요.')
             warnings += scene_warn
     if rules.get('overlay_eating', True) and not scene_mode:
-        kept, overlaid, laid_units = overlay_eating(kept)
+        moments = [m for a in assets if a['analysis'].get('words') for m in _eating_moments(a, frames_by_asset.get(a['id'], []))]
+        kept, overlaid, laid_units = overlay_eating(kept, extra=moments)
         if overlaid:
             notes.append(f'맛 평가 {overlaid}곳에 먹는·단면 화면을 얹었어요(소리는 평가 발화 그대로). 타임라인에서 확인하세요.')
     if total(kept) > target_max and not rules.get('no_trim') and not scene_mode:
@@ -1604,9 +1649,9 @@ def _drop_repeats(kept):
     dropped = 0
     for u in kept:
         o = u.get('overlay')
-        if not o:
-            continue
-        aid = o.get('asset_id', u['asset_id'])
+        if not o or o.get('asset_id', u['asset_id']) == u['asset_id']:
+            continue   # 말하는 원본의 먹는 화면은 빼지 않는다(사용자: '먹방 모습이 사라짐'. 직접 편집본도 1135초 먹는 화면을 두 번 썼다)
+        aid = o['asset_id']
         if any(a == aid and o['start'] - y < REPEAT_NEAR and x - o['end'] < REPEAT_NEAR for a, x, y in shown):
             u.pop('overlay')
             dropped += 1
@@ -1644,7 +1689,7 @@ def _opening_lineup(hook, shots, fps=30, piece=(.8, 1.2)):
     return pieces if len(pieces) >= 2 else []
 
 
-def overlay_eating(kept, window=240.):
+def overlay_eating(kept, window=240., extra=()):
     """맛 평가 발화 위에 가까운 '말 없는 시식·단면 컷'을 화면으로 얹는다(소리는 발화 그대로).
 
     완성본 1116을 원본과 대조한 결과: 소리 컷 60개 중 28개가 이 방식(먹는 화면 + 나중에 말한 평가 소리)이었고,
@@ -1654,6 +1699,11 @@ def overlay_eating(kept, window=240.):
     얹는 데 쓴 시식 컷은 단독 구간으로는 넣지 않는다(같은 장면이 두 번 나오지 않게).
     """
     pool = [{'unit': u, 'cursor': u['start']} for u in kept if u['kind'] == 'visual' and u['role'] in OVERLAY_ROLES and not u.get('bite')]
+    # 말없는 먹는 구간에서 고른 먹방 순간(한입·단면 보여 주기). 시식 나레이션(첫 소감 위 한입 화면)과 겹치거나 이미 있는 화면은 빼고.
+    taken = [(u['asset_id'], u['overlay']['start'], u['overlay']['end']) for u in kept if u.get('overlay')] + \
+            [(u['asset_id'], u['start'], u['end']) for u in kept if u['kind'] == 'visual']
+    pool += [{'unit': m, 'cursor': m['start']} for m in extra
+             if not any(a == m['asset_id'] and m['start'] - y < 2 and x - m['end'] < 2 for a, x, y in taken)]
     used, count = set(), 0
     # 점수("N점 드릴게요")가 나오면 다음 제품이다. 점수를 건너뛴 화면은 다른 제품이라 쓰지 않는다
     # (예시 영상 피드백 '완전 딴 장면': 소금우유 소감 위에 점수 뒤 허니페어 개봉 화면이 얹혔다).
@@ -1676,9 +1726,17 @@ def overlay_eating(kept, window=240.):
         last = max([t for t in scores[asset_id] if t <= lo] + [-1.])
         first = min([t for t in intros.get(asset_id, []) if t > last] + [float('inf')])
         return lo >= first - 1
+    wraps = 0
     for s in sorted((u for u in kept if u['kind'] == 'speech'), key=lambda u: (u['asset_id'], u['start'])):
         labels = set(s['labels'])
-        if s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro', 'describe', 'compare'}:
+        # 전체 총평(마지막 점수 뒤)도 한 줄 걸러 먹는 화면을 얹는다(직접 편집본 1123: 총평 1158~1224초 말 위에 1188·1197·1210초 먹는 화면).
+        # 총평은 네 제품 전체 이야기라 제품 경계를 따지지 않는다.
+        wrap = 'wrapup' in labels and 'score' not in labels and not s.get('after_bite')
+        if wrap:
+            wraps += 1
+            if wraps % 2 == 0:
+                continue
+        elif s.get('after_bite') or not labels & {'taste', 'pro', 'con'} or labels & {'score', 'conclusion', 'repurchase', 'intro', 'describe', 'compare'}:
             continue
         name = (s.get('product') or {}).get('name')
         best = None
@@ -1687,13 +1745,14 @@ def overlay_eating(kept, window=240.):
             if v['asset_id'] != s['asset_id'] or v['end'] - p['cursor'] < .6:
                 continue
             other = (v.get('product') or {}).get('name')
-            if name and other and name != other:
+            if not wrap and name and other and name != other:
                 continue
-            if not same_product(s['asset_id'], p['cursor'], s['speech_start'] if 'speech_start' in s else s['start']):
+            if not wrap and not same_product(s['asset_id'], p['cursor'], s['speech_start'] if 'speech_start' in s else s['start']):
                 continue
             gap = s['start'] - v['end'] if v['end'] <= s['start'] else (v['start'] - s['end']) * 4 + 1   # 먹고 나서 말한 경우를 우선
-            if 0 <= gap <= window and (best is None or gap < best[0]):
-                best = (gap, p)
+            rank = (not v.get('eating_moment'), gap)   # 먹는 구간에서 고른 한입·단면 보여 주기 순간을 먼저(직접 편집본 방식)
+            if 0 <= gap <= window and (best is None or rank < best[0]):
+                best = (rank, p)
         if not best:
             continue
         p = best[1]

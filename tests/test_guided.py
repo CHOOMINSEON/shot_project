@@ -827,3 +827,21 @@ def test_same_scene_is_never_shown_twice_and_detail_shots_spread_over_the_produc
     assert salt[0] < 18 and salt[-1] > 30, salt                                        # 구간 처음부터 끝까지 고르게
     for i, (a, b) in enumerate(shown):
         assert not any(x < b and y > a for x, y in shown[i + 1:]), shown               # 같은 원본 구간 두 번 없음
+
+
+def test_eating_moments_pick_the_bite_and_the_show_inside_each_silent_eating_stretch():
+    # 사용자 피드백 '먹방 모습이 사라짐': '먹기' 태그가 드물어 먹는 화면이 거의 안 나왔다.
+    # 말없이 먹는 구간마다 시각 점수가 가장 높은 한입 순간·단면 보여 주는 순간을 고른다(직접 편집본 246·254초 등).
+    v = asset([w(1, ' 먼저 소금우유 먹어볼게요.', 1, 4), w(2, ' 음 짭짤하고 달아요.', 40, 43)], 60)
+    rows = []
+    for i in range(70):
+        t = 4 + .5 * i
+        r = frame(i, t, t + .5, {}, shot=1)
+        r['similarities'] = {'eating': .2 + (.1 if abs(t - 20) < .3 else 0), 'holding': .2 + (.1 if abs(t - 30) < .3 else 0), 'cream': .2, 'crosssection': .2}
+        rows.append(r)
+    moments = guided._eating_moments(v, rows)
+    centres = sorted(round((m['start'] + m['end']) / 2) for m in moments)
+    assert any(abs(c - 20) <= 1 for c in centres) and any(abs(c - 30) <= 1 for c in centres), centres
+    kept = [{'kind': 'speech', 'asset_id': 'v', 'start': 40, 'end': 43, 'speech_start': 40, 'labels': ['taste'], 'text': '음 짭짤하고 달아요.'}]
+    _, count, _ = guided.overlay_eating(kept, extra=moments)
+    assert count == 1 and kept[0]['overlay']['start'] >= 19   # 말 위에 먹방 순간
