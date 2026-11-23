@@ -1805,13 +1805,32 @@ def _spread(pool, k, gap):
     return sorted(picked, key=lambda s: (s['asset_id'], s['start']))
 
 
+def _spoken(u, after=None):
+    """쉼을 뺀 실제 말 길이(after가 있으면 그 시각 뒤만)."""
+    a = u['start'] if after is None else after
+    return u['end'] - a - sum(c1 - c0 for c0, c1 in u.get('pauses', []) if a < c0 < c1 < u['end'])
+
+
 def _detail_wants(kept, allow=DETAIL_LABELS):
     """디테일 컷을 얹을 발화를 제품별로 모은다(소개·설명·맛 평가 앞부분). 점수·결론·시식 직후 반응은 얼굴."""
-    wants = {}
+    wants, seen = {}, set()
     for u, k in _product_blocks(kept):
         name = (u.get('product') or {}).get('name') or u.get('auto_product')
         labels = set(u['labels'])
         if not name or u.get('overlay') or u.get('after_bite') or u.get('montage') or labels & FACE_LABELS or not labels & allow:
+            continue
+        if allow is DESCRIBE_LABELS:
+            # 직접 편집본 1123: 제품 이름을 말하는 첫 설명('먼저 CU 소금우유는')은 상자를 든 얼굴 그대로,
+            # 그다음 설명('밀크초콜릿에 … 필링이랑 캐러멜칩이 들어갔다는데')은 문장 전체를 같은 제품 컷으로 이어 덮는다.
+            if name not in seen:
+                seen.add(name)
+                inner = [c for c in u.get('pauses', []) if u['start'] < c[0] < c[1] < u['end']]
+                if not inner or _spoken(u, after=inner[0][1]) < DETAIL_SHOW[0]:
+                    continue
+                u['intro_face'] = inner[0][0]   # 'GS호지차부터는'(얼굴) / '겉이 다크 초콜릿인데'(상자 컷)
+            if _spoken(u) < DETAIL_SHOW[0]:
+                continue
+            wants.setdefault(name, []).append(u)
             continue
         if u['end'] - u['start'] - .8 < DETAIL_SHOW[0]:
             continue
@@ -1823,7 +1842,8 @@ def _storyboard(shots, names, wants, reserve=0):
     """제품마다 쓸 디테일 컷을 미리 정한다: 필요한 수(+첫 장면 자리)만큼 그 제품 촬영 구간 전체에 고르게."""
     story = {}
     for n in names:
-        k = min(MAX_LOOKS, len(wants.get(n, [])) + reserve)
+        # 쉼으로 나뉜 긴 설명은 컷 두 개를 이어 쓴다(_overlay_details).
+        k = min(MAX_LOOKS, sum(2 if _spoken(u) > 2.4 and u.get('pauses') else 1 for u in wants.get(n, [])) + reserve)
         by = {}
         for s in shots:
             if not s['lineup'] and s['product'] == n:
@@ -1847,14 +1867,52 @@ def _overlay_details(kept, shots, story=None, allow=DETAIL_LABELS):
             if not looks:
                 break
             s = looks[0]
-            take = min(DETAIL_SHOW[1], s['end'] - s['start'], u['end'] - u['start'] - .8)
-            if take < DETAIL_SHOW[0]:
+            if allow is DESCRIBE_LABELS:
+                # 문장 전체를 덮는다(중간에 얼굴로 잠깐 돌아왔다가 다시 컷으로 가는 깜빡임이 없게).
+                # 긴 설명(쉼으로 나뉜 2.4초 이상)은 쉼에서 다음 컷으로 넘긴다(1123: 상자 여는 컷 → 낱개 컷).
+                need = _spoken(u, u.get('intro_face') and next(c1 for c0, c1 in u['pauses'] if c0 == u['intro_face']))
+                second = looks[1] if len(looks) > 1 and need > 2.4 and len(u.get('pauses', [])) > (1 if u.get('intro_face') else 0) else None
+                first = _detail_window(s, shots, need if not second else need / 2)
+                if not first:
+                    continue
+                u['overlay'] = {**first, 'role': s['role'], 'asset_id': s['asset_id']}
+                if u.get('intro_face'):
+                    u['overlay']['skip'] = 1
+                s['used'] = True
+                count += 1
+                if second:
+                    then = _detail_window(second, shots, need)
+                    if then:
+                        u['overlay']['then'] = {**then, 'role': second['role'], 'asset_id': second['asset_id']}
+                        second['used'] = True
+                        count += 1
                 continue
-            mid = (s['start'] + s['end'] - take) / 2
+            else:
+                take = min(DETAIL_SHOW[1], s['end'] - s['start'], u['end'] - u['start'] - .8)
+                if take < DETAIL_SHOW[0]:
+                    continue
+                mid = (s['start'] + s['end'] - take) / 2
             u['overlay'] = {'start': mid, 'end': mid + take, 'role': s['role'], 'asset_id': s['asset_id']}
             s['used'] = True
             count += 1
     return count
+
+
+def _detail_window(s, shots, need):
+    """디테일 컷 s를 need초까지 늘린 화면 구간. 같은 영상에서 같은 제품으로 이어지는 구간 안에서만 늘린다(다른 제품이 섞이지 않게)."""
+    lo, hi = s['start'], s['end']
+    run = sorted((x for x in shots if x['asset_id'] == s['asset_id'] and x['product'] == s['product']), key=lambda x: x['start'])
+    for x in run:
+        if x['start'] <= hi + .6 and x['end'] > hi:
+            hi = x['end']
+    for x in reversed(run):
+        if x['end'] >= lo - .6 and x['start'] < lo:
+            lo = x['start']
+    take = min(need, hi - lo)
+    if take < DETAIL_SHOW[0]:
+        return None
+    a = min(max(lo, (s['start'] + s['end'] - take) / 2), hi - take)
+    return {'start': a, 'end': a + take}
 
 
 def _opening_slot(shots, order, fps=30, length=11., piece=.9, story=None):
@@ -2096,6 +2154,12 @@ def _cut_pauses(kept):
         over, used = u.get('overlay'), 0.
         for k, (a, b) in enumerate(pieces):
             piece = {**u, 'start': a, 'end': b, 'pauses': [], 'piece': k}
+            if over and k < over.get('skip', 0):
+                piece['overlay'] = None   # 제품 이름을 말하는 앞부분은 얼굴
+                out.append(piece)
+                continue
+            if over and over.get('then') and used >= 1.:
+                over, used = over['then'], 0.   # 쉼에서 다음 컷으로
             if over:
                 v0 = over['start'] + used
                 piece['overlay'] = {**over, 'start': v0, 'end': min(over['end'], v0 + b - a)} if over['end'] - v0 >= .3 else None

@@ -881,17 +881,24 @@ def test_conti_narration_length_sets_how_long_the_opening_slot_is():
 def test_talking_always_shows_the_face_and_narration_only_over_eating():
     # 사용자 규칙(2026-11-23): '말할 때는 무조건 화면을 바라봐야 한다고! 먹을 때만 나레이션을 넣어야 한다고!'
     words = [w(1, ' 오늘은 편의점 디저트 두 개를 먹어볼게요.', 1, 4),
-             w(2, ' 먼저 소금우유는 밀크초콜릿에 캐러멜칩이 들어갔대요.', 10, 14),
+             w(2, ' 먼저 소금우유는 밀크초콜릿이래요.', 10, 13),
+             w(5, ' 안에는 소금우유 필링이랑 캐러멜칩이 들어갔대요.', 14, 17),
              w(3, ' 단짠단짠해서 맛있네요.', 30, 33),
              w(4, ' 이건 8점 드릴게요.', 40, 42)]
-    frames = [frame(1, 10, 14, {}, shot=1), frame(5, 18, 26, {'eating': .4}, shot=5)]
-    detail = [frame(10, 5, 6.5, {'packaging': .3}, shot=7), frame(11, 20, 21.5, {'packaging': .3}, shot=8)]
+    frames = [frame(1, 10, 17, {}, shot=1), frame(5, 18, 26, {'eating': .4}, shot=5)]
+    detail = [frame(10, 5, 6.5, {'packaging': .3}, shot=7), frame(11, 20, 21.5, {'packaging': .3}, shot=8),
+              frame(12, 21.5, 23, {'packaging': .3}, shot=8), frame(13, 23, 24.5, {'packaging': .3}, shot=8)]
     ev = {('v', frames[0]['id']): [{'name': '소금우유', 'status': 'confirmed'}],
           ('d', detail[1]['id']): [{'name': '소금우유', 'status': 'confirmed'}]}
     # 단, 따로 찍어 끼워 둔 같은 제품 컷은 '제품 설명' 위에는 들어간다(2026-11-23 '내가 중간중간 끼워둔 영상이 아예 없어').
     result, _, _ = two_takes(words, frames, detail, ev, face_talk=True)
     inserted = [c for c in result['clips'] if c['asset_id'] == 'v' and c.get('visual_asset_id', 'v') == 'd']
     assert inserted and all(c['guided']['units'][0]['role'] == 'describe' for c in inserted), inserted
+    # 자연스럽게(직접 편집본 1123): 제품 이름을 말하는 첫 줄은 상자 든 얼굴, 다음 설명 줄은 처음부터 끝까지 컷으로 덮는다.
+    assert all(c['start'] >= 13.5 for c in inserted), inserted
+    covered = sum(c['end'] - c['start'] for c in inserted)
+    line = [c for c in result['clips'] if c['asset_id'] == 'v' and 13.5 <= c['start'] < 17.5]
+    assert covered >= .9 * sum(c['end'] - c['start'] for c in line), (inserted, line)
     for c in result['clips']:
         if c['asset_id'] == 'v' and c.get('visual_asset_id', 'v') not in ('v', 'd'):
             raise AssertionError(f'말 위에 다른 원본 화면: {c}')
