@@ -408,6 +408,9 @@ def parse_guideline(text, style='oneshot'):
     rules['face_talk'] = not re.search(r'(설명|말|발화).{0,12}(디테일|제품\s*컷|B\s*롤).{0,8}(얹|깔|넣)', text)
     if rules['face_talk']:
         rules['applied'].append('말할 때는 얼굴 화면 그대로 · 먹는 화면 위에만 소감 나레이션')
+    rules['no_silence'] = not re.search(r'(무음|쉼)\s*(은|을|는)?\s*(유지|남겨|살려)', text)
+    if rules['no_silence']:
+        rules['applied'].append('첫 나레이션 자리 말고는 무음 삭제(말끝은 소리가 잦아드는 곳까지)')
     rules['post_narration'] = bool(POST_NARRATION.search(text)) and not re.search(r'후\s*나레이션\s*(없|안|빼|제외)', text)
     if rules['post_narration']:
         rules['applied'].append('첫 부분에 후 나레이션(캡컷 녹음) 자리: 제품 모아 보여 주기·상자·단면 컷 약 10초')
@@ -682,7 +685,7 @@ def _overlap(a0, a1, b0, b1):
 TAIL_MIN, TAIL_DEFAULT, TAIL_MAX = .2, .25, .35
 
 
-def speech_tail(envelope, end):
+def speech_tail(envelope, end, lo=None):
     """문장 끝 뒤로 얼마나 더 둘지(초). 말끝이 흐려지며 잦아드는 소리까지 살린다.
 
     envelope: {'rate': 초당 값 수, 'db': 10ms 음량(dB) 목록, 'floor': 바닥 소음, 'voice': 말소리 기준}.
@@ -698,7 +701,7 @@ def speech_tail(envelope, end):
     for i in range(start, min(len(db), start + int(TAIL_MAX * rate) + 1)):
         quiet = quiet + 1 if db[i] < threshold else 0
         if quiet >= 6:
-            return min(TAIL_MAX, max(TAIL_MIN, (i - 5) / rate - end + .06))
+            return min(TAIL_MAX, max(TAIL_MIN if lo is None else lo, (i - 5) / rate - end + .06))
     return TAIL_MAX if start < len(db) else TAIL_DEFAULT
 
 
@@ -740,7 +743,23 @@ def find_restarts(bursts, gap=3.):
         short = len(x) <= 3 and b0 - a['end'] <= 1. and similar(x[:2], y[:2]) >= .6
         if short or similar(x[:k], y[:k]) >= .75:
             out.append((float(a['start']), float(a['end'])))
+            continue
+        # 끝에서 더듬은 시도: 앞 구간 끝 2~3글자가 뒤 구간 첫머리('저는 크런.. / 크런키한 식감이')
+        if b0 - a['end'] > 1.:
+            continue
+        for t in (3, 2):
+            if len(x) > t and x[-1] not in ENDINGS and x[-t] == y[0] and similar(x[-t:], y[:t]) >= .4:
+                keep = len(x) - t
+                if keep < 3:      # 앞에 남는 말이 짧으면('저는') 구간째 뺀다: 정상으로 다시 말한 뒤만 남긴다
+                    out.append((float(a['start']), float(a['end'])))
+                else:             # 글자 수 비율로 더듬은 끝부분만 뺀다
+                    cut = a['start'] + (a['end'] - a['start']) * keep / len(x)
+                    out.append((round(float(cut), 2), float(a['end'])))
+                break
     return out
+
+
+ENDINGS = set('요다데고서죠까네지게')   # 말이 끝난 글자: 다음 말이 우연히 같은 소리로 시작해도 더듬은 게 아니다
 
 
 def split_bursts(envelope, speech, dip=.08, shortest=.3):
@@ -968,17 +987,22 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
         rows = [r for r in frames if r['start'] < s['end'] and r['end'] > s['start']]
         labels = [l for l in s['labels'] if l in LABEL_KO] or ['chat']
         lead = s.get('voice_pre', pre)
+        # 무음 삭제(사용자 2026-11-23 '초반 후킹 10초 빼곤 무음 삭제해줘'): 문장 앞뒤 여유를 말소리가 끝나는 곳까지만
+        quiet = rules.get('no_silence') and envelope
+        if quiet:
+            lead = min(lead, .08)
+        tail = speech_tail(envelope, s['end'], .06) if quiet else speech_tail(envelope, s['end'])
         unit = {'kind': 'speech', 'asset_id': asset['id'], 'filename': asset['name'],
-                'start': max(0., s['start'] - lead), 'end': min(duration, s['end'] + speech_tail(envelope, s['end'])), 'speech_start': s['start'],
+                'start': max(0., s['start'] - lead), 'end': min(duration, s['end'] + tail), 'speech_start': s['start'],
                 'speech_end': s['end'], 'text': s['text'], 'labels': labels, 'role': labels[0],
                 'visual_roles': roles[:2], 'confidence': s['confidence'], 'drop': s['drop'],
                 'review': list(s['review']), 'negated': s['negated'], 'numbers': s['numbers'],
                 'texture': s['texture'], 'mistake': s['mistake'], 'complete': s['complete']}
-        if rules.get('tight'):
+        if rules.get('tight') or quiet:
             # 문장 안의 쉼도 뺀다. 쉼 앞 단어의 말끝은 살린다(말끝 흐림 방지).
             cuts = []
             for a, b in s.get('pauses', []):
-                c0, c1 = a + speech_tail(envelope, a), b - pre
+                c0, c1 = (a + speech_tail(envelope, a, .06), b - .08) if quiet else (a + speech_tail(envelope, a), b - pre)
                 if c1 - c0 >= .12:
                     cuts.append((c0, c1))
             unit['pauses'] = cuts
@@ -2072,7 +2096,7 @@ def _merge_clips(kept, assets, rules, fps):
                                       'guided': {'units': [_brief(u)]}}
             continue
         # 문장 사이 0.3초 미만 공백은 이어 붙여 자연스럽게(말 위주 편집·같은 문장의 쉼 조각은 이어 붙이지 않는다).
-        join = .04 if rules.get('tight') or u.get('piece') else .3
+        join = .04 if rules.get('tight') or rules.get('no_silence') or u.get('piece') else .3
         if cur and not cur.get('visual_asset_id') and cur['asset_id'] == u['asset_id'] and 0 <= u['start'] - cur['end'] < join:
             cur['end'] = max(cur['end'], u['end'])
             cur['guided']['units'].append(_brief(u))

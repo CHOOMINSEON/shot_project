@@ -944,3 +944,36 @@ def test_line_said_again_without_words_uses_the_last_attempt():
     assert not any(s < 350.7 and e > 349 for s, e in heard), heard          # 앞 시도는 들리지 않음
     placed = [x for x in timeline.voice_words(a) if x['text'].strip(' .') in ('이건', '8점', '드릴게요')]
     assert all(351.6 <= x['start'] < 352.9 for x in placed), placed           # 자막도 다시 말한 곳에
+
+
+def test_stumble_at_the_end_of_a_piece_is_cut_and_finished_words_are_not():
+    # '저는 크런.. 크런키한 식감이 좋더라구요'(1122 1127.8초): 앞 구간을 빼고 정상으로 말한 뒤만 남긴다
+    assert guided.find_restarts([{'start': 1127.77, 'end': 1128.34, 'text': '저는 크리은!'},
+                                 {'start': 1128.89, 'end': 1129.76, 'text': '크런키아 식'}]) == [(1127.77, 1128.34)]
+    # 앞에 남는 말이 길면 더듬은 끝부분만
+    cut = guided.find_restarts([{'start': 10., 'end': 12., 'text': '저는 개인적으로 크런'},
+                                {'start': 12.5, 'end': 14., 'text': '크런키한 게 좋아요'}])
+    assert len(cut) == 1 and 11.3 < cut[0][0] < 11.8 and cut[0][1] == 12.
+    # 말이 끝난 뒤 같은 소리로 시작하는 다음 말은 그대로
+    assert guided.find_restarts([{'start': 0., 'end': 1., 'text': '맛있어요'}, {'start': 1.3, 'end': 2., 'text': '요거는 진짜'}]) == []
+
+
+def test_silence_is_removed_outside_the_opening_narration_slot():
+    # 사용자 2026-11-23 '초반 후킹 10초 빼곤 무음 삭제해줘': 문장 안 0.3초 쉼도 자르고, 앞뒤 여유는 말소리가 끝나는 곳까지만
+    import numpy as np
+    db = np.full(6000, 40., dtype=np.float32)
+    for a, b in ((1000, 1150), (1180, 1300), (1400, 1520)):
+        db[a:b] = 80.
+    words = [{'id': 'a', 'text': ' 먼저', 'start': 10.0, 'end': 11.5, 'confidence': .95},
+             {'id': 'b', 'text': ' 소금우유는', 'start': 11.8, 'end': 13.0, 'confidence': .95},
+             {'id': 'c', 'text': ' 밀크초콜릿이에요.', 'start': 14.0, 'end': 15.2, 'confidence': .95}]
+    a = asset(words, 60)
+    a['analysis']['speech'] = [[10.0, 11.5], [11.8, 13.0], [14.0, 15.2]]
+    a['_envelope'] = {'rate': 100, 'db': db, 'floor': 40., 'voice': 80.}
+    rules = guided.parse_guideline(default_guideline(), 'oneshot')
+    assert rules['no_silence'] and not guided.parse_guideline('무음은 남겨줘', 'oneshot')['no_silence']
+    clips = guided.plan([a], rules, {'v': []}, {})['clips']
+    heard = sum(c['end'] - c['start'] for c in clips if c['asset_id'] == 'v')
+    voice = 1.5 + 1.2 + 1.2
+    assert heard < voice + .6, clips            # 쉼(0.3초·1초)과 앞뒤 여유가 거의 남지 않음
+    assert all(any(c['start'] <= x + .01 and c['end'] >= y - .01 for c in clips) for x, y in ((10, 11.5), (11.8, 13), (14, 15.2)))
