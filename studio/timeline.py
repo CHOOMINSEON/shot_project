@@ -216,7 +216,7 @@ def voice_words(asset):
     voice = voiced(analysis)   # 버벅이며 다시 말한 앞 시도는 편집에서 빠지므로 자막도 거기 두지 않는다
     if not voice or not words:
         return [dict(w) for w in words]
-    from .guided import SWALLOW, retold, skip_swallowed, snap_to_voice
+    from .guided import SWALLOW, lead_before_restart, retold, skip_swallowed, snap_to_voice
     restarts = [(float(x), float(y)) for x, y in analysis.get('restarts') or []]
     groups, bucket = [], []
     for word in words:
@@ -242,6 +242,10 @@ def voice_words(asset):
         s0, s1, gaps = snap_to_voice(start, end, voice, prev_end, max(nxt, end), swallow)
         if gaps:   # 자동 편집이 빼는 '받아 적지 않은 반복' 구간에는 자막 단어를 펼치지 않는다
             s0, gaps = skip_swallowed(s0, s1, gaps, [(float(w['start']), float(w['end'])) for w in group])
+        if restarts and not again:
+            s0, gaps = lead_before_restart(start, s0, gaps, voice, restarts, prev_end)
+            if gaps and s0 < start - .3:
+                swallow = True   # 첫마디를 앞에서 찾았으면 인식기 시간 비율 대신 글자 수 비율로 펼친다
         pieces, cursor = [], s0
         for a, b in gaps:
             pieces.append((cursor, a))

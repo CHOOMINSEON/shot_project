@@ -794,7 +794,29 @@ def retold(start, end, voice, restarts, taken=(), reach=3.):
         if any(x < b and y > a for x, y in taken):
             break
         out.append((a, b))
+    if not out:
+        # 인식기 단어 시간이 늦게 찍혀(최대 1.5초) 실제 목소리가 앞 시도보다 앞에 있는 경우
+        # (1122 395.1초 'GS 호지차부터는' → 단어는 397.1초, 397.8초는 '겉이 닼' 끊긴 시도)
+        first = min(a for a, _ in mine)
+        before = [(a, b) for a, b in voice if first - 1.5 <= b <= first and not any(x < b and y > a for x, y in taken)]
+        if before:
+            return before[-1]
     return (out[0][0], out[-1][1]) if out else None
+
+
+def lead_before_restart(start, s0, gaps, voice, restarts, lo):
+    """문장 첫머리가 끊긴 시도(뺀 구간)였으면, 인식기 시간이 늦어 그보다 앞에 있는 실제 첫마디를 붙인다 → (s0, gaps).
+
+    1122 원본: 395.1초 'GS 호지차부터는' / 397.8초 '겉이 닼'(뺌) / 398.7초 '겉이 다크 초콜릿인데'. 단어는 397.1초부터
+    찍혀서 첫마디 'GS 호지차부터는'이 빠졌다.
+    """
+    cut = [a for a, b in restarts if b <= s0 + .05 and b > start - VOICE_REACH]
+    if not cut:
+        return s0, gaps
+    lead = [(a, b) for a, b in voice if min(cut) - 1.5 <= b <= min(cut) and a >= lo]
+    if not lead:
+        return s0, gaps
+    return lead[-1][0], [(lead[-1][1], s0)] + list(gaps)
 
 
 def voiced(analysis):
@@ -927,6 +949,7 @@ def _units_for_asset(asset, frames, evidence, rules, notes):
         s0, s1, gaps = snap_to_voice(s['start'], s['end'], voice, prev_end, nxt, swallow)
         if gaps:
             s0, gaps = skip_swallowed(s0, s1, gaps, s.get('word_times', []))
+        s0, gaps = lead_before_restart(s['start'], s0, gaps, voice, restarts, prev_end)
         if envelope:
             # VAD가 늦게 잡은 말 시작(문장 첫머리, 문장 안 쉼 뒤)을 실제 음량으로 당긴다
             s0 = speech_head(envelope, s0, prev_end)
@@ -1254,13 +1277,31 @@ def plan(assets, rules, frames_by_asset=None, evidence=None, fps=30, check=lambd
         _anchor_product_intros(kept)
         order = sorted((u for u in kept if not (set(u['labels']) & MUST_KEEP) and not u.get('bite') and not u.get('after_bite')
                         and not u.get('intro_anchor')), key=lambda u: (score(u), -length(u)))
+        # 말이 이어지는 문장 묶음(끝나지 않은 문장 + 바로 뒤 이어지는 문장)은 같이 빼거나 같이 남긴다.
+        # 1122 예시: '먹으면 순식간에 사라지고 / 편의점 네 군데가'까지만 남고 '돌아서 구매해야 된다는 게 별로였던 것 같고'가
+        # 빠져 말이 중간에 끊겼다(사용자: '중간중간 끊겨있다니깐').
+        speech = sorted((x for x in kept if x['kind'] == 'speech'), key=lambda x: (x['asset_id'], x['start']))
+        thought = {id(x): [x] for x in speech}
+        for x, y in zip(speech, speech[1:]):
+            if x['asset_id'] == y['asset_id'] and not x.get('complete', True) and y['start'] - x['end'] < 4:
+                group = thought[id(x)] + [z for z in thought[id(y)] if z not in thought[id(x)]]
+                for z in group:
+                    thought[id(z)] = group
         for u in order:
             if total(kept) <= target_max:
                 break
-            kept.remove(u)
-            removed.append({'asset_id': u['asset_id'], 'filename': u['filename'], 'start': u['start'], 'end': u['end'],
-                            'reason_code': 'length', 'reason': f'목표 길이 {target_max}초 초과 · 우선순위 낮은 {LABEL_KO.get(u["role"], ROLE_LABEL.get(u["role"], u["role"]))}',
-                            'text': u['text']})
+            if u not in kept:
+                continue
+            group = thought.get(id(u), [u])
+            if any(set(z['labels']) & MUST_KEEP or z.get('bite') or z.get('after_bite') or z.get('intro_anchor') for z in group):
+                continue
+            for z in group:
+                if z not in kept:
+                    continue
+                kept.remove(z)
+                removed.append({'asset_id': z['asset_id'], 'filename': z['filename'], 'start': z['start'], 'end': z['end'],
+                                'reason_code': 'length', 'reason': f'목표 길이 {target_max}초 초과 · 우선순위 낮은 {LABEL_KO.get(z["role"], ROLE_LABEL.get(z["role"], z["role"]))}',
+                                'text': z['text']})
         if total(kept) > target_max:
             warnings.append(f'보존해야 할 결론·문장을 자르지 않아 목표 {target_max}초를 {total(kept) - target_max:.1f}초 넘겼어요.')
     if scene_mode and total(kept) > target_max:
