@@ -249,7 +249,8 @@ bind('timeline-upload-folder','change',async e=>{const files=[...e.target.files]
 dropTarget($('assets'));
 function dropTarget(el){if(!el)return;
   const has=e=>[...(e.dataTransfer?.types||[])].includes('Files');
-  el.addEventListener('dragover',e=>{if(!has(e))return;e.preventDefault();e.dataTransfer.dropEffect='copy';el.classList.add('drag');});
+  // dragover는 끄는 동안 계속 들어오므로, 잠깐 끊기면(놓기·취소·다른 칸이 가로챔) 안내를 바로 지운다
+  el.addEventListener('dragover',e=>{if(!has(e))return;e.preventDefault();e.dataTransfer.dropEffect='copy';el.classList.add('drag');clearTimeout(el._dragOff);el._dragOff=setTimeout(()=>el.classList.remove('drag'),300);});
   el.addEventListener('dragleave',e=>{if(!el.contains(e.relatedTarget))el.classList.remove('drag');});
   el.addEventListener('drop',async e=>{if(!has(e))return;e.preventDefault();el.classList.remove('drag');
     try{const folder=[...(e.dataTransfer.items||[])].some(i=>i.webkitGetAsEntry?.()?.isDirectory);await uploadMedia(await droppedFiles(e.dataTransfer),folder);}catch(error){toast(error.message);}});
@@ -257,6 +258,10 @@ function dropTarget(el){if(!el)return;
 dropTarget($('dropzone'));dropTarget(document.querySelector('section.viewer'));dropTarget(document.querySelector('section.timeline'));
 // 다른 곳에 잘못 놓아도 브라우저가 영상 파일을 열어 버리지 않게 막는다.
 for(const ev of ['dragover','drop'])window.addEventListener(ev,e=>{if([...(e.dataTransfer?.types||[])].includes('Files'))e.preventDefault();});
+// 파일을 놓거나 취소했거나 클릭하면 '여기에 놓으면…' 안내가 남아 있지 않게 모두 지운다
+const clearDrag=()=>document.querySelectorAll('.drag').forEach(x=>x.classList.remove('drag'));
+for(const ev of ['drop','dragend','pointerdown','keydown','blur'])window.addEventListener(ev,clearDrag,true);
+document.addEventListener('dragleave',e=>{if(!e.relatedTarget)clearDrag();});
 bind('login-form','submit',async e=>{e.preventDefault();try{await api('/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('login-dialog').close();await init();}catch(error){$('login-error').textContent=error.message;}});$('login-dialog').addEventListener('cancel',e=>e.preventDefault());action('logout',async()=>{await api('/logout',{method:'POST'});$('player').pause();location.reload();});
 function modelInfo(){
   $('model-status').textContent=config.model_ready?`한국어 Whisper ${config.model_name} 준비됨 · 제품명은 등록하고 원음을 검수해 주세요.`:(config.desktop?'자막 모델을 준비하고 있어요. 상단에서 진행 상황을 확인해 주세요.':'자막 모델 설치 전이에요. 위의 무음 자동 편집은 바로 사용할 수 있어요.');
