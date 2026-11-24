@@ -4,8 +4,8 @@ const list=$('cap-list');if(!list)return;
 let saveTimer=null,pending=null;
 const items=()=>project?.state.captions?.items||[];
 const autosize=t=>{t.style.height='auto';t.style.height=t.scrollHeight+'px';};
-function render(){
-  if(!project)return;const a=document.activeElement;if(a&&list.contains(a)&&a.tagName==='TEXTAREA')return; // 쓰는 중에는 다시 그리지 않음
+function render(force){
+  if(!project)return;const a=document.activeElement;if(!force&&a&&list.contains(a)&&a.tagName==='TEXTAREA')return; // 쓰는 중에는 다시 그리지 않음
   const caps=items();
   list.innerHTML=(caps.length&&!captionSynced()?'<p class="cap-warn">컷이 바뀌었어요. 생성을 다시 눌러 주세요.</p>':'')+
     caps.map((c,i)=>`<div class="cap-row" data-row="${i}"><button type="button" class="cap-time" data-cap-seek="${i}">${clock(c.start)}</button><textarea data-cap="${i}" rows="1" spellcheck="false">${esc(c.text)}</textarea></div>`).join('');
@@ -23,6 +23,18 @@ function save(){if(!pending)return Promise.resolve();const {i,text}=pending;clea
   return mutate(s=>{const c=s.captions.items[i];if(c&&c.text!==text)Object.assign(c,{text,edited:true,review:true,review_token:''});}).then(()=>{if(pending&&pending.i===i&&pending.text===text)pending=null;}).catch(e=>{pending=null;toast(e.message);});}
 list.addEventListener('input',e=>{const t=e.target.closest('[data-cap]');if(!t)return;autosize(t);const i=+t.dataset.cap;
   overlay(i,t.value);pending={i,text:t.value};clearTimeout(saveTimer);saveTimer=setTimeout(save,500);});
+// Ctrl+Enter: 커서 위치에서 자막을 두 칸으로 나눔(뒷부분은 바로 아래 새 칸, 시간은 글자 수 비율로). 그냥 Enter는 줄바꿈.
+let splitting=false;
+list.addEventListener('keydown',e=>{const t=e.target.closest('[data-cap]');if(!t||e.key!=='Enter'||!(e.ctrlKey||e.metaKey)||e.isComposing)return;
+  e.preventDefault();if(splitting)return;const i=+t.dataset.cap,c=items()[i];if(!c)return;
+  const before=t.value.slice(0,t.selectionStart).replace(/\s+$/,''),after=t.value.slice(t.selectionEnd).replace(/^\s+/,'');
+  const total=before.length+after.length,ratio=before&&after?Math.min(.85,Math.max(.15,before.length/total)):.5;
+  const middle=Math.round((c.start+(c.end-c.start)*ratio)*1000)/1000,id=uuid();
+  clearTimeout(saveTimer);pending=null;splitting=true;
+  mutate(s=>{const x=s.captions.items[i];if(!x)return;const pad=Math.min(.05,(x.end-x.start)/4),mid=Math.min(Math.max(middle,x.start+pad),x.end-pad);
+    s.captions.items.splice(i,1,{...x,end:mid,text:before,edited:true,review:true,review_token:''},{...x,id,start:mid,text:after,edited:true,review:true,review_token:''});})
+  .then(()=>{render(true);const n=items().findIndex(x=>x.id===id),box=list.querySelector(`[data-cap="${n}"]`);if(box){box.focus();box.setSelectionRange(0,0);box.scrollIntoView({block:'nearest'});}})
+  .catch(err=>toast(err.message)).finally(()=>{splitting=false;});});
 list.addEventListener('focusout',e=>{if(e.target.closest('[data-cap]'))save().then(()=>setTimeout(render,0));});
 // 줄을 누르면 그 자막 시간으로 이동(멈춤)
 list.addEventListener('click',e=>{const r=e.target.closest('.cap-row');const i=r?+r.dataset.row:null;
