@@ -355,3 +355,8 @@ body.marqueeing,body.marqueeing *{user-select:none;cursor:crosshair!important}
 /* 15차: 프로젝트 이름 칸을 위 선택 칸과 같은 위치로, 자막 줄 전체 클릭 */
 .studio .project-title input{padding-left:10px!important;border:1px solid transparent!important;border-radius:7px}
 .cap-row{cursor:pointer}
+/* 늘리기 손잡이: 평소엔 숨기고, 클립 끝에 마우스를 올렸을 때와 끄는 동안에만 보이게(잡는 영역은 그대로) */
+.studio .timeline-clip .trim,.layer-clip .trim,.studio .timeline-clip:hover .trim,.layer-clip:hover .trim,.studio .timeline-clip.active .trim,.layer-clip.active .trim,.studio .timeline-clip.trimming .trim,.layer-clip.trimming .trim{background:transparent}
+.studio .timeline-clip .trim::after,.layer-clip .trim::after{opacity:0!important}
+.studio .timeline-clip .trim:hover,.layer-clip .trim:hover,.studio .timeline-clip .trim.on,.layer-clip .trim.on{background:#fff}
+.studio .timeline-clip .trim:hover::after,.layer-clip .trim:hover::after,.studio .timeline-clip .trim.on::after,.layer-clip .trim.on::after{opacity:1!important}
