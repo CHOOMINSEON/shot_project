@@ -395,7 +395,7 @@ function playheadX(){const h=playhead();if(!h)return null;let off=0;for(let i=0;
 function drawPlayhead(){const el=lineHead,x=playheadX();if(x===null){el.classList.add('hidden');return;}el.style.left=x+'px';el.style.top=wrap.scrollTop+'px';el.style.height=wrap.clientHeight+'px';el.classList.remove('hidden');}
 $('player').addEventListener('timeupdate',drawPlayhead);$('player').addEventListener('seeked',drawPlayhead);
 // 재생 중에는 매 프레임 선을 옮기고, 화면 밖으로 나가면 따라 스크롤한다.
-let phLoop=0;function phTick(){const p=$('player');drawPlayhead();
+let phLoop=0;function phTick(){const p=$('player');clipBoundary();drawPlayhead();
   const x=playheadX();if(x!==null&&!scrub&&(x>wrap.scrollLeft+wrap.clientWidth-30||x<wrap.scrollLeft))wrap.scrollLeft=Math.max(0,x-40);
   phLoop=p.paused?0:requestAnimationFrame(phTick);}
 $('player').addEventListener('play',()=>{if(!phLoop)phLoop=requestAnimationFrame(phTick);});
