@@ -236,3 +236,22 @@ def test_two_hour_duration_metadata_limit(tmp_path):
         else:
             with pytest.raises(ValueError, match='2시간'):
                 probe(path)
+
+
+def test_playback_preview_copy_has_dense_keyframes(owner, sample):
+    """편집 화면 재생용 사본: 처음엔 준비 중, 만들어지면 같은 길이·짧은 키프레임 간격으로 제공한다."""
+    p, _ = upload_video(owner, sample)
+    asset_id = p['assets'][0]['id']
+    assert owner.get(f'/api/assets/{asset_id}/preview.mp4').status_code in [200, 404]
+    deadline = time.monotonic() + 60
+    while not owner.get(f'/api/assets/{asset_id}/preview-status').json()['ready']:
+        assert time.monotonic() < deadline
+        time.sleep(.2)
+    response = owner.get(f'/api/assets/{asset_id}/preview.mp4')
+    assert response.status_code == 200 and response.headers['content-type'] == 'video/mp4'
+    path = DATA / 'assets' / asset_id / 'preview.mp4'
+    meta = probe(path, allow_audio=True)
+    assert abs(meta['duration'] - 8) < .1 and meta['has_audio']
+    keys = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v', '-skip_frame', 'nokey', '-show_entries',
+                           'frame=pts_time', '-of', 'csv=p=0', str(path)], capture_output=True, text=True, check=True).stdout.split()
+    assert max(float(b.strip(',')) - float(a.strip(',')) for a, b in zip(keys, keys[1:])) <= .34

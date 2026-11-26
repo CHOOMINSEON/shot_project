@@ -557,6 +557,74 @@ def video(ident: str):
     return FileResponse(worker.asset_path(ident),media_type=mime)
 
 
+# 재생용 가벼운 사본: 촬영 원본(4K·5초마다 키프레임)은 컷이 바뀔 때마다 탐색이 느려 재생이 자꾸 멈춘다.
+# 짧은 변(540px) H.264, 키프레임 1/3초 간격 사본을 한 번 만들어 두고 편집 화면 재생에만 쓴다(내보내기는 원본 그대로).
+_preview_jobs = {}
+_preview_gate = None
+
+
+def _preview_path(ident):
+    return DATA / 'assets' / ident / 'preview.mp4'
+
+
+def _make_preview(asset):
+    import threading
+    from .media import color_filter, run_ffmpeg
+    global _preview_gate
+    if _preview_gate is None:
+        _preview_gate = threading.Semaphore(1)
+    ident = asset['id']
+    with _preview_gate:
+        path = _preview_path(ident)
+        if path.exists():
+            return
+        partial = path.with_name('preview.part.mp4')
+        meta = asset['metadata']
+        scale = "scale='if(gt(iw,ih),-2,540)':'if(gt(iw,ih),540,-2)'"
+        args = ['-protocol_whitelist', 'file,pipe', '-i', worker.asset_path(ident), '-map', '0:v:0', '-map', '0:a:0?',
+                '-vf', f"{color_filter(meta)},{scale}", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27',
+                '-g', '10', '-keyint_min', '10', '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-movflags', '+faststart', '-f', 'mp4', partial]
+        try:
+            run_ffmpeg(args, DATA / 'work' / ('preview-' + ident), expected_seconds=float(meta.get('duration') or 0))
+            os.replace(partial, path)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+        finally:
+            shutil.rmtree(DATA / 'work' / ('preview-' + ident), ignore_errors=True)
+
+
+@app.get('/api/assets/{ident}/preview-status')
+def preview_status(ident: str):
+    import threading
+    asset = db.get_asset(ident)
+    if asset['status'] != 'ready' or not asset['metadata'].get('has_video', True):
+        return {'ready': False, 'available': False}
+    if _preview_path(ident).exists():
+        return {'ready': True, 'available': True}
+    job = _preview_jobs.get(ident)
+    if job is None or (not job.is_alive() and not _preview_path(ident).exists() and not getattr(job, 'failed', False)):
+        def build():
+            try:
+                _make_preview(asset)
+            except Exception:
+                threading.current_thread().failed = True
+        job = threading.Thread(target=build, daemon=True, name='preview-' + ident)
+        _preview_jobs[ident] = job
+        job.start()
+    return {'ready': False, 'available': not getattr(job, 'failed', False)}
+
+
+@app.get('/api/assets/{ident}/preview.mp4')
+def preview_video(ident: str):
+    db.get_asset(ident)
+    path = _preview_path(ident)
+    if not path.exists():
+        raise HTTPException(404, '재생용 사본을 만드는 중입니다.')
+    return FileResponse(path, media_type='video/mp4', headers={'Cache-Control': 'private, max-age=86400'})
+
+
 @app.get('/api/assets/{ident}/thumbnail')
 def thumbnail(ident: str):
     asset = db.get_asset(ident)
